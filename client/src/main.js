@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { createScene } from './scene.js';
 import { buildTileMap } from './tileRenderer.js';
+import { Collider } from './collider.js';
 import { Player } from './player.js';
 
 const { scene, camera, renderer } = createScene();
@@ -15,9 +16,11 @@ function generateGrid(rows, cols) {
   );
 }
 
-buildTileMap(scene, generateGrid(20, 20));
+const grid = generateGrid(20, 20);
+buildTileMap(scene, grid);
 
-const player = new Player(scene);
+const collider = new Collider(grid);
+const player = new Player(scene, collider);
 const clock = new THREE.Clock();
 const cameraOffset = new THREE.Vector3(20, 20, 20);
 

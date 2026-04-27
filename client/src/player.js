@@ -1,15 +1,15 @@
 import * as THREE from 'three';
 
-const SPEED = 5; // units per second
+const SPEED = 5;
 
 export class Player {
-  constructor(scene) {
+  constructor(scene, collider) {
+    this.collider = collider;
     this.keys = {};
 
     const geo = new THREE.BoxGeometry(0.6, 0.9, 0.6);
     const mat = new THREE.MeshLambertMaterial({ color: 0x00d4ff });
     this.mesh = new THREE.Mesh(geo, mat);
-    // floor tile top surface is at y=0.2, player half-height is 0.45
     this.mesh.position.set(0, 0.65, 0);
     this.mesh.castShadow = true;
     scene.add(this.mesh);
@@ -25,9 +25,14 @@ export class Player {
     if (this.keys['a']) dir.x -= 1;
     if (this.keys['d']) dir.x += 1;
 
-    if (dir.lengthSq() > 0) {
-      dir.normalize().multiplyScalar(SPEED * delta);
-      this.mesh.position.add(dir);
-    }
+    if (dir.lengthSq() === 0) return;
+
+    dir.normalize().multiplyScalar(SPEED * delta);
+
+    const { x, z } = this.mesh.position;
+
+    // Resolve axes independently so player slides along walls
+    if (this.collider.passable(x + dir.x, z)) this.mesh.position.x += dir.x;
+    if (this.collider.passable(this.mesh.position.x, z + dir.z)) this.mesh.position.z += dir.z;
   }
 }
