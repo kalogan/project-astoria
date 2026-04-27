@@ -10,6 +10,7 @@ import { EnemySystem }     from './enemySystem.js';
 import { CombatSystem }    from './combatSystem.js';
 import { HUD }             from './hud.js';
 import { QuestSystem }     from './questSystem.js';
+import { saveGame, loadGame } from './persistence.js';
 
 const { scene, camera, renderer } = createScene();
 
@@ -47,33 +48,44 @@ const collider  = new Collider(grid);
 const inventory = new Inventory();
 const entities  = new EntityManager(scene, ENTITY_DEFS);
 const enemySys  = new EnemySystem(scene, grid, ENEMY_DEFS);
-const quests    = new QuestSystem(QUEST_DEFS);
+const questSys  = new QuestSystem(QUEST_DEFS);
 const player    = new Player(scene, collider);
 const hud       = new HUD(camera);
 const combat    = new CombatSystem(scene, enemySys, player, {
   onKill: () => {
-    quests.notify('kill');
-    hud.setQuests(quests.all());
+    questSys.notify('kill');
+    hud.setQuests(questSys.all());
   },
 });
 const triggers  = new TriggerSystem();
-const clock     = new THREE.Clock();
-const cameraOffset = new THREE.Vector3(20, 20, 20);
 
-hud.initEnemyLabels(enemySys.enemies);
-hud.setPlayerHP(player.hp, player.maxHp);
-hud.setInventory(inventory.items);
-hud.setQuests(quests.all());
+const saveCtx = { player, entities, enemySys, combat, triggers, questSys, hud };
 
 triggers.register({
   condition: areaCondition(3, 3, 1.5),
   action: () => entities.doors.find(d => d.id === 'door_red')?.unlock(),
 });
-
 triggers.register({
   condition: areaCondition(7, 0, 1),
   action: () => { player.mesh.position.set(-7, 0.65, 0); },
 });
+
+// Init HUD
+hud.initEnemyLabels(enemySys.enemies);
+hud.setInventory(inventory.items);
+hud.setQuests(questSys.all());
+
+// Load save if exists
+loadGame(saveCtx);
+
+// Auto-save on unload + Ctrl+S
+window.addEventListener('beforeunload', () => saveGame(saveCtx));
+window.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 's') { e.preventDefault(); saveGame(saveCtx); }
+});
+
+const clock        = new THREE.Clock();
+const cameraOffset = new THREE.Vector3(20, 20, 20);
 
 function animate() {
   requestAnimationFrame(animate);

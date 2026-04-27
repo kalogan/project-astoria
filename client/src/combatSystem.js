@@ -65,6 +65,14 @@ export class CombatSystem {
     }
   }
 
+  loadLoot(items) {
+    for (const item of items) {
+      const l = new Loot(this.scene, item.x, item.z);
+      if (item.collected) l.collect();
+      this.loot.push(l);
+    }
+  }
+
   _attack(hud) {
     const pp = this.player.mesh.position;
     let target = null;
