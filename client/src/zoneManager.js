@@ -17,19 +17,27 @@ export class ZoneManager {
     this.hud      = hud;
     this.player   = player;
 
-    this.activeId    = null;
-    this.tileGroup   = null;
-    this.collider    = null;
-    this.entities    = null;
-    this.enemySys    = null;
-    this.triggers    = null;
-    this.cameraBounds = null;
+    this.activeId           = null;
+    this.tileGroup          = null;
+    this.collider           = null;
+    this.entities           = null;
+    this.enemySys           = null;
+    this.triggers           = null;
+    this.cameraBounds       = null;
+    this._loading           = false;
+    this._transitionCooldown = 0;
   }
 
   async load(zoneId, spawnPos = null) {
+    if (this._loading) { console.warn(`[Zone] load(${zoneId}) blocked — already loading`); return; }
+    this._loading = true;
+    console.log(`[Zone] loading "${zoneId}"`, spawnPos ?? '(default spawn)');
+
     const zone = await this._fetch(zoneId);
     this._unload();
     this.activeId = zone.id;
+    // Cooldown: ignore loadZone triggers for 1s after transition
+    this._transitionCooldown = 1.0;
 
     const rows = zone.grid.length;
     const cols = zone.grid[0].length;
@@ -67,9 +75,16 @@ export class ZoneManager {
     // Triggers
     this.triggers = new TriggerSystem();
     for (const def of zone.triggers ?? []) this._registerTrigger(def);
+
+    this._loading = false;
+    console.log(`[Zone] "${zone.id}" ready — player at`, this.player.mesh.position);
   }
 
   update(delta, playerPos) {
+    if (this._transitionCooldown > 0) {
+      this._transitionCooldown -= delta;
+      if (this._transitionCooldown <= 0) console.log('[Zone] transition cooldown cleared');
+    }
     this.enemySys?.update(delta, playerPos);
     this.triggers?.update(playerPos);
   }
@@ -104,7 +119,14 @@ export class ZoneManager {
     };
     const actions = {
       unlockDoor: () => this.entities?.doors.find(d => d.id === def.doorId)?.unlock(),
-      loadZone:   () => this.load(def.zoneId, { x: def.spawnX ?? 0, z: def.spawnZ ?? 0 }),
+      loadZone: () => {
+        if (this._transitionCooldown > 0) {
+          console.log(`[Zone] loadZone("${def.zoneId}") suppressed — cooldown ${this._transitionCooldown.toFixed(2)}s`);
+          return;
+        }
+        console.log(`[Zone] trigger fired → loadZone("${def.zoneId}")`);
+        this.load(def.zoneId, { x: def.spawnX ?? 0, z: def.spawnZ ?? 0 });
+      },
     };
     const action = actions[def.action];
     if (action) this.triggers.register({ condition, action, once: def.once ?? true });
