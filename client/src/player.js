@@ -6,6 +6,7 @@ export class Player {
   constructor(scene, collider) {
     this.collider = collider;
     this.keys = {};
+    this.interactPressed = false;
 
     const geo = new THREE.BoxGeometry(0.6, 0.9, 0.6);
     const mat = new THREE.MeshLambertMaterial({ color: 0x00d4ff });
@@ -14,8 +15,18 @@ export class Player {
     this.mesh.castShadow = true;
     scene.add(this.mesh);
 
-    window.addEventListener('keydown', e => { this.keys[e.key.toLowerCase()] = true; });
-    window.addEventListener('keyup',   e => { this.keys[e.key.toLowerCase()] = false; });
+    window.addEventListener('keydown', e => {
+      const k = e.key.toLowerCase();
+      this.keys[k] = true;
+      if (k === 'e') this.interactPressed = true;
+    });
+    window.addEventListener('keyup', e => { this.keys[e.key.toLowerCase()] = false; });
+  }
+
+  consumeInteract() {
+    const v = this.interactPressed;
+    this.interactPressed = false;
+    return v;
   }
 
   update(delta) {
@@ -30,9 +41,7 @@ export class Player {
     dir.normalize().multiplyScalar(SPEED * delta);
 
     const { x, z } = this.mesh.position;
-
-    // Resolve axes independently so player slides along walls
-    if (this.collider.passable(x + dir.x, z)) this.mesh.position.x += dir.x;
+    if (this.collider.passable(x + dir.x, z))               this.mesh.position.x += dir.x;
     if (this.collider.passable(this.mesh.position.x, z + dir.z)) this.mesh.position.z += dir.z;
   }
 }
