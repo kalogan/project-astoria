@@ -26,7 +26,7 @@ const combat = new CombatSystem(scene, { enemies: [] }, player, {
   },
 });
 
-const zone = new ZoneManager(scene, combat, hud, player);
+const zone = new ZoneManager(scene, camera, renderer, combat, hud, player);
 
 const saveCtx = { player, zone, combat, questSys, hud };
 
@@ -72,8 +72,13 @@ function animate() {
   hud.updateEnemyLabels();
   hud.setDebugPos(player.mesh.position.x, player.mesh.position.y, player.mesh.position.z);
 
-  camera.position.copy(player.mesh.position).add(cameraOffset);
-  camera.lookAt(player.mesh.position);
+  // Clamp camera target to zone bounds so void is never revealed
+  const b = zone.cameraBounds;
+  const cx = b ? Math.max(b.minX, Math.min(b.maxX, player.mesh.position.x)) : player.mesh.position.x;
+  const cz = b ? Math.max(b.minZ, Math.min(b.maxZ, player.mesh.position.z)) : player.mesh.position.z;
+  const camTarget = new THREE.Vector3(cx, player.mesh.position.y, cz);
+  camera.position.copy(camTarget).add(cameraOffset);
+  camera.lookAt(camTarget);
 
   renderer.render(scene, camera);
 }

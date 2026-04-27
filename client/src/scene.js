@@ -1,19 +1,39 @@
 import * as THREE from 'three';
 
+// frustumSize is mutable — updated per zone by setFrustumSize()
+let _frustumSize = 22;
+
+export function setFrustumSize(camera, renderer, size) {
+  _frustumSize = size;
+  const a = window.innerWidth / window.innerHeight;
+  camera.left   = (_frustumSize * a) / -2;
+  camera.right  = (_frustumSize * a) /  2;
+  camera.top    =  _frustumSize / 2;
+  camera.bottom =  _frustumSize / -2;
+  camera.updateProjectionMatrix();
+}
+
 export function createScene() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1a1a2e);
 
-  // Isometric orthographic camera — frustum sized for a 20x20 grid
-  const frustumSize = 22;
+  // Large background plane — hides the void at zone edges
+  const bgPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(300, 300),
+    new THREE.MeshLambertMaterial({ color: 0x12121e })
+  );
+  bgPlane.rotation.x = -Math.PI / 2;
+  bgPlane.position.y = -0.05;
+  scene.add(bgPlane);
+
+  // Isometric orthographic camera
   const aspect = window.innerWidth / window.innerHeight;
   const camera = new THREE.OrthographicCamera(
-    (frustumSize * aspect) / -2,
-    (frustumSize * aspect) /  2,
-     frustumSize / 2,
-     frustumSize / -2,
-    0.1,
-    1000
+    (_frustumSize * aspect) / -2,
+    (_frustumSize * aspect) /  2,
+     _frustumSize / 2,
+     _frustumSize / -2,
+    0.1, 1000
   );
   camera.position.set(20, 20, 20);
   camera.lookAt(0, 0, 0);
@@ -36,10 +56,10 @@ export function createScene() {
 
   window.addEventListener('resize', () => {
     const a = window.innerWidth / window.innerHeight;
-    camera.left   = (frustumSize * a) / -2;
-    camera.right  = (frustumSize * a) /  2;
-    camera.top    =  frustumSize / 2;
-    camera.bottom =  frustumSize / -2;
+    camera.left   = (_frustumSize * a) / -2;
+    camera.right  = (_frustumSize * a) /  2;
+    camera.top    =  _frustumSize / 2;
+    camera.bottom =  _frustumSize / -2;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
