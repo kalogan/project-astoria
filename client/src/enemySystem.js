@@ -89,4 +89,9 @@ export class EnemySystem {
   update(delta, playerPos) {
     for (const enemy of this.enemies) enemy.update(delta, playerPos);
   }
+
+  dispose(scene) {
+    for (const e of this.enemies) scene.remove(e.mesh);
+    this.enemies = [];
+  }
 }

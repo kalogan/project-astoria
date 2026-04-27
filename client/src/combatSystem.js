@@ -65,6 +65,15 @@ export class CombatSystem {
     }
   }
 
+  setEnemies(enemies) {
+    this.enemies = enemies;
+  }
+
+  clearLoot(scene) {
+    for (const l of this.loot) scene.remove(l.mesh);
+    this.loot = [];
+  }
+
   loadLoot(items) {
     for (const item of items) {
       const l = new Loot(this.scene, item.x, item.z);

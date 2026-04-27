@@ -63,6 +63,11 @@ export class HUD {
     }
   }
 
+  clearEnemyLabels() {
+    for (const { wrap } of this.enemyLabels) wrap.remove();
+    this.enemyLabels = [];
+  }
+
   updateEnemyLabels() {
     for (const { wrap, bar, enemy } of this.enemyLabels) {
       if (!enemy.alive) { wrap.style.display = 'none'; continue; }

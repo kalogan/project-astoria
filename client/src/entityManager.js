@@ -29,4 +29,11 @@ export class EntityManager {
       }
     }
   }
+
+  dispose(scene) {
+    for (const k of this.keys)  scene.remove(k.mesh);
+    for (const d of this.doors) scene.remove(d.mesh);
+    this.keys  = [];
+    this.doors = [];
+  }
 }
