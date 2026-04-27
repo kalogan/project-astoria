@@ -70,6 +70,7 @@ function animate() {
 
   hud.setPlayerHP(player.hp, player.maxHp);
   hud.updateEnemyLabels();
+  hud.setDebugPos(player.mesh.position.x, player.mesh.position.y, player.mesh.position.z);
 
   camera.position.copy(player.mesh.position).add(cameraOffset);
   camera.lookAt(player.mesh.position);

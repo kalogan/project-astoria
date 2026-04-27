@@ -18,6 +18,7 @@ export class HUD {
     this._buildPlayerHP();
     this._buildInventory();
     this._buildQuestTracker();
+    this._buildDebug();
   }
 
   // ── Player HP ──────────────────────────────────────────────
@@ -112,6 +113,19 @@ export class HUD {
       const label = done ? `${q.title} complete` : `${q.title}: ${q.progress}/${q.goal}`;
       return `<div style="color:${color}">${label}</div>`;
     }).join('') || '<div style="color:#444">none</div>';
+  }
+
+  // ── Debug ──────────────────────────────────────────────────
+  _buildDebug() {
+    this._debugEl = el('div', {
+      position: 'absolute', top: '20px', left: '20px',
+      color: '#666', fontSize: '11px', letterSpacing: '0.5px',
+    });
+    this.root.appendChild(this._debugEl);
+  }
+
+  setDebugPos(x, y, z) {
+    this._debugEl.textContent = `x:${x.toFixed(2)}  y:${y.toFixed(2)}  z:${z.toFixed(2)}`;
   }
 
   // ── Util ───────────────────────────────────────────────────

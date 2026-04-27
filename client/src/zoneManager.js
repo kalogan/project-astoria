@@ -20,9 +20,9 @@ export class ZoneManager {
   }
 
   async load(zoneId, spawnPos = null) {
-    this._unload();
-
+    // Fetch before unloading so the old zone stays visible during the async wait
     const zone = await this._fetch(zoneId);
+    this._unload();
     this.activeId = zone.id;
 
     // Tiles + collider
