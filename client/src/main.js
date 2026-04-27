@@ -7,6 +7,7 @@ import { EntityManager }   from './entityManager.js';
 import { Inventory }       from './inventory.js';
 import { TriggerSystem, areaCondition } from './triggerSystem.js';
 import { EnemySystem }     from './enemySystem.js';
+import { CombatSystem }    from './combatSystem.js';
 
 const { scene, camera, renderer } = createScene();
 
@@ -39,19 +40,18 @@ const ENEMY_DEFS = [
 const collider  = new Collider(grid);
 const inventory = new Inventory();
 const entities  = new EntityManager(scene, ENTITY_DEFS);
-const enemies   = new EnemySystem(scene, grid, ENEMY_DEFS);
+const enemySys  = new EnemySystem(scene, grid, ENEMY_DEFS);
 const player    = new Player(scene, collider);
+const combat    = new CombatSystem(scene, enemySys, player);
 const triggers  = new TriggerSystem();
 const clock     = new THREE.Clock();
 const cameraOffset = new THREE.Vector3(20, 20, 20);
 
-// Trigger: unlock red door when player enters top-right corner
 triggers.register({
   condition: areaCondition(3, 3, 1.5),
   action: () => entities.doors.find(d => d.id === 'door_red')?.unlock(),
 });
 
-// Trigger: teleport player from east road to west
 triggers.register({
   condition: areaCondition(7, 0, 1),
   action: () => { player.mesh.position.set(-7, 0.65, 0); },
@@ -64,7 +64,8 @@ function animate() {
   player.update(delta);
   if (player.consumeInteract()) entities.interact(player.mesh.position, inventory);
   triggers.update(player.mesh.position);
-  enemies.update(delta, player.mesh.position);
+  enemySys.update(delta, player.mesh.position);
+  combat.update(delta);
 
   camera.position.copy(player.mesh.position).add(cameraOffset);
   camera.lookAt(player.mesh.position);
