@@ -6,6 +6,7 @@ import { Player }          from './player.js';
 import { EntityManager }   from './entityManager.js';
 import { Inventory }       from './inventory.js';
 import { TriggerSystem, areaCondition } from './triggerSystem.js';
+import { EnemySystem }     from './enemySystem.js';
 
 const { scene, camera, renderer } = createScene();
 
@@ -29,42 +30,31 @@ const ENTITY_DEFS = [
   { type: 'door', id: 'door_blue', keyId: 'blue', x:  0, z: -6, color: 0x00008b },
 ];
 
+const ENEMY_DEFS = [
+  { x:  4, z:  4 },
+  { x: -4, z:  4 },
+  { x:  4, z: -4 },
+];
+
 const collider  = new Collider(grid);
 const inventory = new Inventory();
 const entities  = new EntityManager(scene, ENTITY_DEFS);
+const enemies   = new EnemySystem(scene, grid, ENEMY_DEFS);
 const player    = new Player(scene, collider);
 const triggers  = new TriggerSystem();
 const clock     = new THREE.Clock();
 const cameraOffset = new THREE.Vector3(20, 20, 20);
 
-// --- Trigger: unlock door ---
+// Trigger: unlock red door when player enters top-right corner
 triggers.register({
   condition: areaCondition(3, 3, 1.5),
-  action: () => {
-    const door = entities.doors.find(d => d.id === 'door_red');
-    door?.unlock();
-  },
+  action: () => entities.doors.find(d => d.id === 'door_red')?.unlock(),
 });
 
-// --- Trigger: teleport player ---
+// Trigger: teleport player from east road to west
 triggers.register({
   condition: areaCondition(7, 0, 1),
-  action: () => {
-    player.mesh.position.set(-7, 0.65, 0);
-  },
-});
-
-// --- Trigger: spawn enemy ---
-triggers.register({
-  condition: areaCondition(0, 4, 1.5),
-  action: () => {
-    const geo = new THREE.BoxGeometry(0.6, 0.9, 0.6);
-    const mat = new THREE.MeshLambertMaterial({ color: 0xff6600 });
-    const enemy = new THREE.Mesh(geo, mat);
-    enemy.position.set(0, 0.65, 6);
-    enemy.castShadow = true;
-    scene.add(enemy);
-  },
+  action: () => { player.mesh.position.set(-7, 0.65, 0); },
 });
 
 function animate() {
@@ -74,6 +64,7 @@ function animate() {
   player.update(delta);
   if (player.consumeInteract()) entities.interact(player.mesh.position, inventory);
   triggers.update(player.mesh.position);
+  enemies.update(delta, player.mesh.position);
 
   camera.position.copy(player.mesh.position).add(cameraOffset);
   camera.lookAt(player.mesh.position);
