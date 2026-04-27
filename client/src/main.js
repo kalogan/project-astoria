@@ -7,6 +7,7 @@ import { HUD }           from './hud.js';
 import { QuestSystem }   from './questSystem.js';
 import { ZoneManager }   from './zoneManager.js';
 import { getSave, saveGame, applySave } from './persistence.js';
+import { showMenu } from './menu.js';
 
 const { scene, camera, renderer } = createScene();
 
@@ -32,7 +33,9 @@ const saveCtx = { player, zone, combat, questSys, hud };
 
 // Async startup
 (async () => {
-  const save = getSave();
+  const choice = await showMenu();
+  const save   = choice === 'continue' ? getSave() : null;
+
   if (save?.activeZone) {
     await zone.load(save.activeZone);
     applySave(save, saveCtx);
