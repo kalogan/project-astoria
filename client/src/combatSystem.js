@@ -4,7 +4,7 @@ const ATTACK_RANGE    = 2.5;
 const ATTACK_DAMAGE   = 34;
 const ATTACK_COOLDOWN = 0.4;
 const FLASH_DURATION  = 0.08;
-const LOOT_PICKUP_SQ  = 1.0; // squared distance
+const LOOT_PICKUP_SQ  = 1.0;
 
 class Loot {
   constructor(scene, x, z) {
@@ -23,10 +23,11 @@ class Loot {
 }
 
 export class CombatSystem {
-  constructor(scene, enemySystem, player) {
+  constructor(scene, enemySystem, player, { onKill } = {}) {
     this.scene       = scene;
     this.enemies     = enemySystem.enemies;
     this.player      = player;
+    this.onKill      = onKill ?? (() => {});
     this.cooldown    = 0;
     this.loot        = [];
     this.flashing    = [];
@@ -35,18 +36,17 @@ export class CombatSystem {
     window.addEventListener('click', () => { this.attackReady = true; });
   }
 
-  update(delta) {
+  update(delta, hud) {
     this.cooldown = Math.max(0, this.cooldown - delta);
 
     if (this.attackReady) {
       this.attackReady = false;
       if (this.cooldown === 0) {
-        this._attack();
+        this._attack(hud);
         this.cooldown = ATTACK_COOLDOWN;
       }
     }
 
-    // Restore flashed enemy colors
     for (let i = this.flashing.length - 1; i >= 0; i--) {
       const f = this.flashing[i];
       f.timer -= delta;
@@ -56,7 +56,6 @@ export class CombatSystem {
       }
     }
 
-    // Auto-collect nearby loot
     const pp = this.player.mesh.position;
     for (const l of this.loot) {
       if (l.collected) continue;
@@ -66,7 +65,7 @@ export class CombatSystem {
     }
   }
 
-  _attack() {
+  _attack(hud) {
     const pp = this.player.mesh.position;
     let target = null;
     let bestDist = Infinity;
@@ -84,10 +83,12 @@ export class CombatSystem {
 
     if (!target) return;
 
-    const dead = target.takeDamage(ATTACK_DAMAGE);
+    hud?.spawnDamageNumber(target.mesh.position, ATTACK_DAMAGE);
 
+    const dead = target.takeDamage(ATTACK_DAMAGE);
     if (dead) {
       this.loot.push(new Loot(this.scene, target.mesh.position.x, target.mesh.position.z));
+      this.onKill();
     } else {
       target.mat.color.setHex(0xffffff);
       this.flashing.push({ enemy: target, timer: FLASH_DURATION });

@@ -1,12 +1,15 @@
 import * as THREE from 'three';
 
-const SPEED = 5;
+const SPEED  = 5;
+const MAX_HP = 100;
 
 export class Player {
   constructor(scene, collider) {
-    this.collider = collider;
-    this.keys = {};
+    this.collider       = collider;
+    this.keys           = {};
     this.interactPressed = false;
+    this.hp             = MAX_HP;
+    this.maxHp          = MAX_HP;
 
     const geo = new THREE.BoxGeometry(0.6, 0.9, 0.6);
     const mat = new THREE.MeshLambertMaterial({ color: 0x00d4ff });
@@ -41,7 +44,7 @@ export class Player {
     dir.normalize().multiplyScalar(SPEED * delta);
 
     const { x, z } = this.mesh.position;
-    if (this.collider.passable(x + dir.x, z))               this.mesh.position.x += dir.x;
+    if (this.collider.passable(x + dir.x, z))                    this.mesh.position.x += dir.x;
     if (this.collider.passable(this.mesh.position.x, z + dir.z)) this.mesh.position.z += dir.z;
   }
 }

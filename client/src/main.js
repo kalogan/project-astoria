@@ -8,6 +8,8 @@ import { Inventory }       from './inventory.js';
 import { TriggerSystem, areaCondition } from './triggerSystem.js';
 import { EnemySystem }     from './enemySystem.js';
 import { CombatSystem }    from './combatSystem.js';
+import { HUD }             from './hud.js';
+import { QuestSystem }     from './questSystem.js';
 
 const { scene, camera, renderer } = createScene();
 
@@ -37,15 +39,31 @@ const ENEMY_DEFS = [
   { x:  4, z: -4 },
 ];
 
+const QUEST_DEFS = [
+  { id: 'kill_all', type: 'kill', title: 'Exterminator', goal: 3 },
+];
+
 const collider  = new Collider(grid);
 const inventory = new Inventory();
 const entities  = new EntityManager(scene, ENTITY_DEFS);
 const enemySys  = new EnemySystem(scene, grid, ENEMY_DEFS);
+const quests    = new QuestSystem(QUEST_DEFS);
 const player    = new Player(scene, collider);
-const combat    = new CombatSystem(scene, enemySys, player);
+const hud       = new HUD(camera);
+const combat    = new CombatSystem(scene, enemySys, player, {
+  onKill: () => {
+    quests.notify('kill');
+    hud.setQuests(quests.all());
+  },
+});
 const triggers  = new TriggerSystem();
 const clock     = new THREE.Clock();
 const cameraOffset = new THREE.Vector3(20, 20, 20);
+
+hud.initEnemyLabels(enemySys.enemies);
+hud.setPlayerHP(player.hp, player.maxHp);
+hud.setInventory(inventory.items);
+hud.setQuests(quests.all());
 
 triggers.register({
   condition: areaCondition(3, 3, 1.5),
@@ -62,10 +80,17 @@ function animate() {
   const delta = clock.getDelta();
 
   player.update(delta);
-  if (player.consumeInteract()) entities.interact(player.mesh.position, inventory);
+  if (player.consumeInteract()) {
+    entities.interact(player.mesh.position, inventory);
+    hud.setInventory(inventory.items);
+  }
+
   triggers.update(player.mesh.position);
   enemySys.update(delta, player.mesh.position);
-  combat.update(delta);
+  combat.update(delta, hud);
+
+  hud.setPlayerHP(player.hp, player.maxHp);
+  hud.updateEnemyLabels();
 
   camera.position.copy(player.mesh.position).add(cameraOffset);
   camera.lookAt(player.mesh.position);
