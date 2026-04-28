@@ -14,7 +14,21 @@
       "Bash(vercel --prod)",
       "Bash(npm run *)",
       "Bash(npm install *)",
-      "Bash(node scripts/copy-client.js)"
+      "Bash(node scripts/copy-client.js)",
+      "Bash(xargs cat *)",
+      "Bash(curl -I \"https://project-astoria-r7krrvstb-kalogans-projects.vercel.app/tools/tile-editor\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/tools/tile-editor\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/tools/tile-editor/\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/tools/tile-editor/index.html\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/client/index.html\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/\")",
+      "Bash(curl -s \"https://project-astoria-gamma.vercel.app/\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/index.html\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/zones/zone1.json\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/src/main.js\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/vercel.json\")",
+      "Bash(curl -sI \"https://project-astoria-gamma.vercel.app/package.json\")",
+      "Bash(git rm *)"
     ]
   }
 }

@@ -21,6 +21,10 @@ import {
 import { generateCave }   from './caveGen';
 import { generateDungeon } from './dungeonGen';
 import { populateDungeon, ROOM_TYPE_COLORS, ROOM_TYPE_LABELS } from './questGen';
+import { PROP_DEFS, PROP_CATEGORIES, detectWallDirection, canPlaceProp } from './propDefs';
+import { drawProp, propSortKey } from './propRenderer';
+import { PREFABS, rotatePrefab, canPlacePrefab, applyPrefab } from './prefabs/prefabDefs';
+import { computeFOV, drawFOVOverlay } from './fovUtils';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TW             = 64;
@@ -46,6 +50,17 @@ const ENTITY_PALETTE = [
   { type: 'transition', subtype: 'cave_entrance', label: 'Cave Entrance', color: '#58504a', icon: 'C', defaultConfig: { targetZone: '' } },
   { type: 'marker',     subtype: 'generic',    label: 'Room Marker',     color: '#9b59b6', icon: 'M', defaultConfig: { label: '', color: '#9b59b6' } },
 ];
+
+// ── Surface overlay definitions ───────────────────────────────────────────────
+// zone.surface = { "col,row": ["sand","moss",...] }
+const SURFACE_TYPES = {
+  sand:        { label: 'Sand',        color: 'rgba(210,185,110,0.38)' },
+  moss:        { label: 'Moss',        color: 'rgba(80,120,50,0.40)'   },
+  grass_patch: { label: 'Grass Patch', color: 'rgba(60,140,60,0.35)'   },
+  cracks:      { label: 'Cracks',      color: 'rgba(60,50,40,0.42)'    },
+  mud:         { label: 'Mud',         color: 'rgba(100,70,40,0.40)'   },
+  snow:        { label: 'Snow',        color: 'rgba(220,235,255,0.50)' },
+};
 
 // ── Water flow helper ──────────────────────────────────────────────────────────
 // Ensures zone.waterFlow exists and matches tile dimensions.
@@ -216,6 +231,13 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     heights = null, showHeightDebug = false,
     waterFlow = null, animOffset = 0,
     waterMod = null, zoneType = 'surface',
+    props = null, surface = null, showProps = true,
+    ghostProp = null,           // { type, x, y, valid } — placement preview
+    ghostPrefab = null,         // { prefab, x, y, valid } — prefab preview
+    selectedPropId = null,
+    showPropBounds = false,
+    fovSet = null, showFOV = false,
+    showSurface = true,
   } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
@@ -326,6 +348,33 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     drawSplashEffect(ctx, sx, sy, TW, TH, row, col, animOffset);
   }
 
+  // ── 2b. Surface overlays (painted on top of tiles, below props) ───────────────
+  if (showSurface && surface) {
+    for (const [key, types] of Object.entries(surface)) {
+      const [c, r] = key.split(',').map(Number);
+      if (r < 0 || r >= rows || c < 0 || c >= cols || tiles[r][c] === 0) continue;
+      const h = getH(heights, r, c);
+      const { x: sx, y: syBase } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
+      const sy  = syBase - h * HEIGHT_SCALE;
+      const hw  = TW * 0.5, hh = TH * 0.5;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + hw, sy + hh);
+      ctx.lineTo(sx, sy + TH);
+      ctx.lineTo(sx - hw, sy + hh);
+      ctx.closePath();
+      ctx.clip();
+      for (const stype of (Array.isArray(types) ? types : [types])) {
+        const def = SURFACE_TYPES[stype];
+        if (!def) continue;
+        ctx.fillStyle = def.color;
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
   // ── 3. Structures (bridges, docks, piers) ─────────────────────────────────────
   const structures = (zone.entities ?? []).filter(e => e.type === 'structure');
   for (const entity of structures) {
@@ -357,6 +406,107 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
         const { x: dsx, y: dsyBase } = gridToScreen(dr_, dc_, ISO_ORIGIN, TW, TH);
         drawDockSegment(ctx, dsx, dsyBase - dh * HEIGHT_SCALE, TW, TH, ori,
                         i === 0, i === len ? 'tip' : i, dr_, dc_);
+      }
+    }
+  }
+
+  // ── 3b. Props (sorted by depth, back-to-front) ────────────────────────────────
+  if (showProps && props?.length) {
+    const sorted = [...props].sort((a, b) => propSortKey(a) - propSortKey(b));
+    for (const prop of sorted) {
+      const h = getH(heights, prop.y, prop.x);
+      const { x: sx, y: syBase } = gridToScreen(prop.y, prop.x, ISO_ORIGIN, TW, TH);
+      const sy  = syBase - h * HEIGHT_SCALE;
+      const def = PROP_DEFS[prop.type];
+      const wallDir = def?.anchor === 'wall' ? detectWallDirection(prop.x, prop.y, tiles) : null;
+      const isSelected = prop.id === selectedPropId;
+      if (isSelected) {
+        // Selection ring
+        const cx = sx, cy = sy + TH * 0.5;
+        ctx.save();
+        ctx.strokeStyle = P.accent;
+        ctx.lineWidth   = 2;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.arc(cx, cy, TW * 0.30, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+      if (showPropBounds && def) {
+        const { x: ex, y: ey } = gridToScreen(prop.y + (def.height ?? 1) - 1, prop.x + (def.width ?? 1) - 1, ISO_ORIGIN, TW, TH);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(0,212,255,0.45)';
+        ctx.lineWidth   = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeRect(Math.min(sx, ex) - TW * 0.5, sy, Math.abs(ex - sx) + TW, Math.abs(ey - sy) + TH);
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+      drawProp(ctx, sx, sy, TW, TH, prop, wallDir, 'horizontal');
+    }
+  }
+
+  // ── 3c. Ghost prop preview (placement overlay) ────────────────────────────────
+  if (ghostProp && ghostProp.x !== undefined) {
+    const { type, x, y, valid } = ghostProp;
+    const h = getH(heights, y, x);
+    const { x: sx, y: syBase } = gridToScreen(y, x, ISO_ORIGIN, TW, TH);
+    const sy     = syBase - h * HEIGHT_SCALE;
+    const def    = PROP_DEFS[type];
+    const wallDir = def?.anchor === 'wall' ? detectWallDirection(x, y, tiles) : null;
+    // Footprint tint
+    const fpW = def?.width ?? 1, fpH = def?.height ?? 1;
+    for (let dy = 0; dy < fpH; dy++) {
+      for (let dx = 0; dx < fpW; dx++) {
+        const { x: fx, y: fyBase } = gridToScreen(y + dy, x + dx, ISO_ORIGIN, TW, TH);
+        const fy  = fyBase - h * HEIGHT_SCALE;
+        const hw  = TW * 0.5, hh = TH * 0.5;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(fx, fy);
+        ctx.lineTo(fx + hw, fy + hh);
+        ctx.lineTo(fx, fy + TH);
+        ctx.lineTo(fx - hw, fy + hh);
+        ctx.closePath();
+        ctx.fillStyle = valid ? 'rgba(0,212,255,0.15)' : 'rgba(255,60,60,0.25)';
+        ctx.fill();
+        ctx.strokeStyle = valid ? 'rgba(0,212,255,0.5)' : 'rgba(255,60,60,0.7)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+    drawProp(ctx, sx, sy, TW, TH,
+      { type, x, y, offsetX: 0, offsetY: 0, rotation: 0, scale: 1 },
+      wallDir, 'horizontal', 0.55);
+  }
+
+  // ── 3d. Ghost prefab preview ──────────────────────────────────────────────────
+  if (ghostPrefab && ghostPrefab.prefab) {
+    const { prefab, x: px, y: py, valid } = ghostPrefab;
+    for (let dy = 0; dy < prefab.height; dy++) {
+      for (let dx = 0; dx < prefab.width; dx++) {
+        const tv = prefab.tiles[dy]?.[dx] ?? 0;
+        if (!tv) continue;
+        const gx = px + dx, gy = py + dy;
+        const h  = getH(heights, gy, gx);
+        const { x: fx, y: fyBase } = gridToScreen(gy, gx, ISO_ORIGIN, TW, TH);
+        const fy  = fyBase - h * HEIGHT_SCALE;
+        const hw  = TW * 0.5, hh = TH * 0.5;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(fx, fy);
+        ctx.lineTo(fx + hw, fy + hh);
+        ctx.lineTo(fx, fy + TH);
+        ctx.lineTo(fx - hw, fy + hh);
+        ctx.closePath();
+        ctx.fillStyle = valid ? 'rgba(0,255,150,0.18)' : 'rgba(255,60,60,0.22)';
+        ctx.fill();
+        ctx.strokeStyle = valid ? 'rgba(0,255,150,0.55)' : 'rgba(255,60,60,0.7)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
       }
     }
   }
@@ -420,6 +570,11 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   {
     const envCfg = ZONE_ENV[zoneType];
     if (envCfg?.vignette) drawVignette(ctx, W, H, envCfg.vignette);
+  }
+
+  // ── 6. FOV overlay (screen-space, drawn over vignette) ────────────────────────
+  if (showFOV && fovSet) {
+    drawFOVOverlay(ctx, fovSet, tiles, ISO_ORIGIN, TW, TH, camera, gridToScreen);
   }
 
   // ── 4. Hover diamond (screen space) ───────────────────────────────────────────
@@ -599,6 +754,31 @@ export default function MapEditorTab({ config }) {
     maxRoomSize: 10, seed: 12345,
   });
 
+  // ── Prop mode ─────────────────────────────────────────────────────────────────
+  const [propCategory,    setPropCategory]    = useState('forest');
+  const [activePropType,  setActivePropType]  = useState('tree_small');
+  const [selectedPropId,  setSelectedPropId]  = useState(null);
+  const [showProps,       setShowProps]       = useState(true);
+  const [showPropBounds,  setShowPropBounds]  = useState(false);
+  const [ghostPropTile,   setGhostPropTile]   = useState(null); // {x,y,valid} or null
+
+  // ── Surface mode ──────────────────────────────────────────────────────────────
+  const [activeSurface,   setActiveSurface]   = useState('sand');
+  const [surfaceBrushSize, setSurfaceBrushSize] = useState(1);
+  const [showSurface,     setShowSurface]     = useState(true);
+  const [isPaintingSurface, setIsPaintingSurface] = useState(false);
+
+  // ── Prefab mode ───────────────────────────────────────────────────────────────
+  const [activePrefab,    setActivePrefab]    = useState(Object.keys(PREFABS)[0]);
+  const [prefabRotation,  setPrefabRotation]  = useState(0);  // 0|1|2|3
+  const [prefabStampMode, setPrefabStampMode] = useState('stamp'); // 'stamp'|'merge'
+  const [ghostPrefabTile, setGhostPrefabTile] = useState(null);
+
+  // ── FOV debug ─────────────────────────────────────────────────────────────────
+  const [showFOV,   setShowFOV]   = useState(false);
+  const [fovOrigin, setFovOrigin] = useState(null); // {x,y} grid cell
+  const [fovRadius, setFovRadius] = useState(10);
+
   // ── Tile mode ────────────────────────────────────────────────────────────────
   const [selectedTileType, setSelectedTileType] = useState(TILE_TYPES.FLOOR);
   const [hoveredTile,      setHovered]          = useState(null);
@@ -648,6 +828,12 @@ export default function MapEditorTab({ config }) {
   const heightDeltaRef       = useRef(1);    // +1 raise / -1 lower, set on mousedown
   const rotationAngleRef     = useRef(rotationAngle);
   const selectedFlowDirRef   = useRef(selectedFlowDir);
+  const activePropTypeRef      = useRef(activePropType);
+  const activeSurfaceRef       = useRef(activeSurface);
+  const surfaceBrushSizeRef    = useRef(surfaceBrushSize);
+  const activePrefabRef        = useRef(activePrefab);
+  const prefabRotationRef      = useRef(prefabRotation);
+  const prefabStampModeRef     = useRef(prefabStampMode);
   const animOffsetRef        = useRef(0);   // ever-increasing time for water animation
   const animRafRef           = useRef(null);
   const drawOptsRef          = useRef(null); // latest draw params for RAF loop
@@ -661,11 +847,27 @@ export default function MapEditorTab({ config }) {
   useEffect(() => { brushToolRef.current         = brushTool; },        [brushTool]);
   useEffect(() => { brushSizeRef.current         = brushSize; },        [brushSize]);
   useEffect(() => { rotationAngleRef.current     = rotationAngle; },    [rotationAngle]);
-  useEffect(() => { selectedFlowDirRef.current  = selectedFlowDir; },  [selectedFlowDir]);
+  useEffect(() => { selectedFlowDirRef.current   = selectedFlowDir; },  [selectedFlowDir]);
+  useEffect(() => { activePropTypeRef.current      = activePropType; },     [activePropType]);
+  useEffect(() => { activeSurfaceRef.current       = activeSurface; },      [activeSurface]);
+  useEffect(() => { surfaceBrushSizeRef.current    = surfaceBrushSize; },   [surfaceBrushSize]);
+  useEffect(() => { activePrefabRef.current        = activePrefab; },       [activePrefab]);
+  useEffect(() => { prefabRotationRef.current      = prefabRotation; },     [prefabRotation]);
+  useEffect(() => { prefabStampModeRef.current     = prefabStampMode; },    [prefabStampMode]);
 
   // ── Keep draw opts mirror current on every render (for RAF loop) ─────────────
   useLayoutEffect(() => {
-    const zoneType = zone?.type ?? 'surface';
+    const zoneType   = zone?.type ?? 'surface';
+    const fovSet     = (showFOV && fovOrigin && zone?.tiles)
+      ? computeFOV(fovOrigin.x, fovOrigin.y, zone.tiles, fovRadius)
+      : null;
+    const rotatedPrefab = PREFABS[activePrefab] ? rotatePrefab(PREFABS[activePrefab], prefabRotation) : null;
+    const ghostProp  = (editorMode === 'props' && ghostPropTile)
+      ? { ...ghostPropTile, type: activePropType }
+      : null;
+    const ghostPrefab = (editorMode === 'prefabs' && ghostPrefabTile && rotatedPrefab)
+      ? { prefab: rotatedPrefab, ...ghostPrefabTile }
+      : null;
     drawOptsRef.current = {
       zone, hoveredTile, camera, config, selectedEntityId, editorMode,
       overlayOpts: {
@@ -675,6 +877,11 @@ export default function MapEditorTab({ config }) {
         waterFlow:      zone?.waterFlow ?? null,
         waterMod:       ZONE_ENV[zoneType]?.waterMod ?? null,
         zoneType,
+        props:          zone?.props  ?? null,
+        surface:        zone?.surface ?? null,
+        showProps, showSurface, showPropBounds,
+        selectedPropId, ghostProp, ghostPrefab,
+        fovSet, showFOV,
       },
     };
   }); // no deps — runs after every render
@@ -730,6 +937,16 @@ export default function MapEditorTab({ config }) {
     const canvas  = canvasRef.current;
     if (!canvas) return;
     const zoneType = zone?.type ?? 'surface';
+    const fovSet   = (showFOV && fovOrigin && zone?.tiles)
+      ? computeFOV(fovOrigin.x, fovOrigin.y, zone.tiles, fovRadius)
+      : null;
+    const rotatedPrefab = PREFABS[activePrefab] ? rotatePrefab(PREFABS[activePrefab], prefabRotation) : null;
+    const ghostProp  = (editorMode === 'props' && ghostPropTile)
+      ? { ...ghostPropTile, type: activePropType }
+      : null;
+    const ghostPrefab = (editorMode === 'prefabs' && ghostPrefabTile && rotatedPrefab)
+      ? { prefab: rotatedPrefab, ...ghostPrefabTile }
+      : null;
     drawMapCanvas(
       canvas, zone, hoveredTile, camera, config,
       selectedEntityId, editorMode,
@@ -740,10 +957,18 @@ export default function MapEditorTab({ config }) {
         animOffset:     animOffsetRef.current,
         waterMod:       ZONE_ENV[zoneType]?.waterMod ?? null,
         zoneType,
+        props:          zone?.props  ?? null,
+        surface:        zone?.surface ?? null,
+        showProps, showSurface, showPropBounds,
+        selectedPropId, ghostProp, ghostPrefab,
+        fovSet, showFOV,
       },
     );
   }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
-      refImage, refOpacity, refVisible, showGrid, debugMode, showHeightDebug]);
+      refImage, refOpacity, refVisible, showGrid, debugMode, showHeightDebug,
+      showProps, showSurface, showPropBounds, selectedPropId,
+      ghostPropTile, ghostPrefabTile, activePropType, activePrefab, prefabRotation,
+      showFOV, fovOrigin, fovRadius]);
 
   // ── Center camera on new map ──────────────────────────────────────────────────
   useEffect(() => {
@@ -807,17 +1032,28 @@ export default function MapEditorTab({ config }) {
   useEffect(() => {
     const onKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-        e.preventDefault();
-        undo();
+        e.preventDefault(); undo(); return;
       }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
-        e.preventDefault();
-        redo();
+        e.preventDefault(); redo(); return;
+      }
+      // R — rotate prefab
+      if (e.key === 'r' || e.key === 'R') {
+        if (editorModeRef.current === 'prefabs') {
+          setPrefabRotation(r => (r + 1) % 4);
+        }
+        return;
+      }
+      // Delete / Backspace — remove selected prop
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !e.ctrlKey) {
+        if (editorModeRef.current === 'props') {
+          setSelectedPropId(id => { if (id) deleteProp(id); return null; });
+        }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [undo, redo]);
+  }, [undo, redo, deleteProp]);
 
   // ── Zone load ─────────────────────────────────────────────────────────────────
   const loadZoneById = useCallback(async (id) => {
@@ -1058,6 +1294,69 @@ export default function MapEditorTab({ config }) {
     setIsDirty(true);
   }, []);
 
+  // ── Prop CRUD ─────────────────────────────────────────────────────────────────
+  const placeProp = useCallback((x, y) => {
+    const z = zoneRef.current;
+    if (!z) return;
+    const existingProps = z.props ?? [];
+    if (!canPlaceProp(x, y, activePropType, existingProps, z.tiles)) return;
+    const def = PROP_DEFS[activePropType];
+    const prop = {
+      id:      `prop_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      type:    activePropType,
+      x, y,
+      offsetX: (Math.random() - 0.5) * 0.3,
+      offsetY: (Math.random() - 0.5) * 0.2,
+      rotation: def?.anchor !== 'wall' ? Math.random() * Math.PI * 2 : 0,
+      scale:   0.88 + Math.random() * 0.28,
+    };
+    setZone(prev => {
+      if (!prev) return prev;
+      return { ...prev, props: [...(prev.props ?? []), prop] };
+    });
+    setSelectedPropId(prop.id);
+    setIsDirty(true);
+  }, [activePropType]);
+
+  const deleteProp = useCallback((id) => {
+    commitHistory();
+    setZone(prev => {
+      if (!prev) return prev;
+      return { ...prev, props: (prev.props ?? []).filter(p => p.id !== id) };
+    });
+    setSelectedPropId(null);
+    setIsDirty(true);
+  }, [commitHistory]);
+
+  // ── Surface paint ─────────────────────────────────────────────────────────────
+  const paintSurface = useCallback((row, col, erase = false) => {
+    const z = zoneRef.current;
+    if (!z) return;
+    const radius = Math.floor(surfaceBrushSizeRef.current / 2);
+    setZone(prev => {
+      if (!prev) return prev;
+      const newSurface = { ...(prev.surface ?? {}) };
+      const rows_ = prev.tiles.length, cols_ = prev.tiles[0].length;
+      for (let dr = -radius; dr <= radius; dr++) {
+        for (let dc = -radius; dc <= radius; dc++) {
+          const rr = row + dr, cc = col + dc;
+          if (rr < 0 || rr >= rows_ || cc < 0 || cc >= cols_) continue;
+          if (prev.tiles[rr][cc] === 0) continue;
+          const key = `${cc},${rr}`;
+          if (erase) {
+            delete newSurface[key];
+          } else {
+            const existing = newSurface[key] ?? [];
+            if (!existing.includes(activeSurface))
+              newSurface[key] = [...existing, activeSurface];
+          }
+        }
+      }
+      return { ...prev, surface: newSurface };
+    });
+    setIsDirty(true);
+  }, [activeSurface]);
+
   // ── Grid hit-test ─────────────────────────────────────────────────────────────
   const hitTest = useCallback((mouseX, mouseY) => {
     const z = zoneRef.current;
@@ -1117,6 +1416,60 @@ export default function MapEditorTab({ config }) {
           lastMouseRef.current = { x: e.clientX, y: e.clientY };
         }
 
+      } else if (editorModeRef.current === 'props') {
+        const tile = hitTest(mx, my);
+        if (tile) {
+          // Right-click or Shift-click near an existing prop: select or delete
+          const z = zoneRef.current;
+          const propsArr = z?.props ?? [];
+          // Simple nearest-prop hit: check if any prop is within 1 tile of click
+          const nearby = propsArr.find(p => Math.abs(p.x - tile.col) < 1.5 && Math.abs(p.y - tile.row) < 1.5);
+          if (e.shiftKey && nearby) {
+            deleteProp(nearby.id);
+          } else if (!e.shiftKey && nearby) {
+            setSelectedPropId(nearby.id);
+          } else {
+            commitHistory();
+            placeProp(tile.col, tile.row);
+          }
+        } else {
+          isPanningRef.current = true;
+          lastMouseRef.current = { x: e.clientX, y: e.clientY };
+        }
+
+      } else if (editorModeRef.current === 'surface') {
+        const tile = hitTest(mx, my);
+        if (tile) {
+          commitHistory();
+          paintSurface(tile.row, tile.col, e.shiftKey);
+          setIsPaintingSurface(true);
+        } else {
+          isPanningRef.current = true;
+          lastMouseRef.current = { x: e.clientX, y: e.clientY };
+        }
+
+      } else if (editorModeRef.current === 'prefabs') {
+        const tile = hitTest(mx, my);
+        if (tile) {
+          const z = zoneRef.current;
+          if (!z) return;
+          const rot     = prefabRotationRef.current;
+          const prefabId = activePrefabRef.current;
+          const raw     = PREFABS[prefabId];
+          if (!raw) return;
+          const prefab  = rotatePrefab(raw, rot);
+          const ox      = tile.col - prefab.origin.x;
+          const oy      = tile.row - prefab.origin.y;
+          if (canPlacePrefab(ox, oy, prefab, z)) {
+            commitHistory();
+            setZone(prev => prev ? applyPrefab(prev, ox, oy, prefab, prefabStampModeRef.current) : prev);
+            setIsDirty(true);
+          }
+        } else {
+          isPanningRef.current = true;
+          lastMouseRef.current = { x: e.clientX, y: e.clientY };
+        }
+
       } else {
         // Tile mode ─ Alt+click picks tile type
         if (e.altKey) {
@@ -1144,7 +1497,8 @@ export default function MapEditorTab({ config }) {
         }
       }
     }
-  }, [hitTest, applyTileTool, placeEntity, commitHistory, adjustHeight]);
+  }, [hitTest, applyTileTool, placeEntity, commitHistory, adjustHeight,
+      placeProp, deleteProp, paintSurface]);
 
   const handleMouseMove = useCallback((e) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -1171,17 +1525,52 @@ export default function MapEditorTab({ config }) {
     if (editorModeRef.current === 'height' && isPaintingRef.current && tile) {
       adjustHeight(tile.row, tile.col, heightDeltaRef.current);
     }
-  }, [hitTest, applyTileTool, adjustHeight]);
+    // Drag-paint surface
+    if (editorModeRef.current === 'surface' && isPaintingSurface && tile) {
+      paintSurface(tile.row, tile.col, false);
+    }
+    // Ghost prop preview
+    if (editorModeRef.current === 'props') {
+      if (tile) {
+        const z   = zoneRef.current;
+        const valid = z ? canPlaceProp(tile.col, tile.row, activePropTypeRef.current,
+                                       z.props ?? [], z.tiles) : false;
+        setGhostPropTile({ x: tile.col, y: tile.row, valid });
+      } else {
+        setGhostPropTile(null);
+      }
+    }
+    // Ghost prefab preview
+    if (editorModeRef.current === 'prefabs') {
+      if (tile) {
+        const z     = zoneRef.current;
+        const raw   = PREFABS[activePrefabRef.current];
+        const pfb   = raw ? rotatePrefab(raw, prefabRotationRef.current) : null;
+        if (pfb && z) {
+          const ox = tile.col - pfb.origin.x, oy = tile.row - pfb.origin.y;
+          setGhostPrefabTile({ x: ox, y: oy, valid: canPlacePrefab(ox, oy, pfb, z) });
+        } else {
+          setGhostPrefabTile(null);
+        }
+      } else {
+        setGhostPrefabTile(null);
+      }
+    }
+  }, [hitTest, applyTileTool, adjustHeight, paintSurface, isPaintingSurface]);
 
   const handleMouseUp = useCallback(() => {
     isPanningRef.current = false;
     setIsPainting(false);
+    setIsPaintingSurface(false);
   }, []);
 
   const handleMouseLeave = useCallback(() => {
     isPanningRef.current = false;
     setIsPainting(false);
+    setIsPaintingSurface(false);
     setHovered(null);
+    setGhostPropTile(null);
+    setGhostPrefabTile(null);
   }, []);
 
   // ── Wheel zoom ────────────────────────────────────────────────────────────────
@@ -1227,22 +1616,40 @@ export default function MapEditorTab({ config }) {
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}>
 
-        {/* Mode toggle */}
-        <div style={{ display: 'flex', borderBottom: `1px solid ${P.border}`, flexShrink: 0 }}>
-          {[['tile', 'TILE'], ['height', 'HT'], ['entity', 'ENT'], ['generate', 'GEN']].map(([mode, label]) => {
-            const active = editorMode === mode;
-            return (
-              <button key={mode} onClick={() => switchMode(mode)} style={{
-                flex: 1, background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
-                border: 'none', borderBottom: `2px solid ${active ? P.accent : 'transparent'}`,
-                color: active ? P.accent : P.muted,
-                fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
-                padding: '10px 0', cursor: 'pointer',
-              }}>
-                {label}
-              </button>
-            );
-          })}
+        {/* Mode toggle — two rows */}
+        <div style={{ display: 'flex', flexDirection: 'column', borderBottom: `1px solid ${P.border}`, flexShrink: 0 }}>
+          <div style={{ display: 'flex' }}>
+            {[['tile', 'TILE'], ['height', 'HT'], ['entity', 'ENT'], ['generate', 'GEN']].map(([mode, label]) => {
+              const active = editorMode === mode;
+              return (
+                <button key={mode} onClick={() => switchMode(mode)} style={{
+                  flex: 1, background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                  border: 'none', borderBottom: `2px solid ${active ? P.accent : 'transparent'}`,
+                  color: active ? P.accent : P.muted,
+                  fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
+                  padding: '8px 0', cursor: 'pointer',
+                }}>
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', borderTop: `1px solid ${P.border}` }}>
+            {[['props', 'PROPS'], ['surface', 'SURF'], ['prefabs', 'PFB']].map(([mode, label]) => {
+              const active = editorMode === mode;
+              return (
+                <button key={mode} onClick={() => switchMode(mode)} style={{
+                  flex: 1, background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                  border: 'none', borderBottom: `2px solid ${active ? P.accent : 'transparent'}`,
+                  color: active ? P.accent : P.muted,
+                  fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
+                  padding: '7px 0', cursor: 'pointer',
+                }}>
+                  {label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div style={{
@@ -1838,6 +2245,280 @@ export default function MapEditorTab({ config }) {
             </>
           )}
 
+          {/* ── PROPS MODE ──────────────────────────────────────────────────── */}
+          {editorMode === 'props' && (
+            <>
+              <Section title="PROP CATEGORY">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {Object.entries(PROP_CATEGORIES).map(([id, label]) => {
+                    const active = propCategory === id;
+                    return (
+                      <button key={id} onClick={() => setPropCategory(id)} style={{
+                        background: active ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        color: active ? P.accent : P.muted,
+                        fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
+                        padding: '5px 10px', cursor: 'pointer',
+                      }}>
+                        {label.toUpperCase()}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Section>
+
+              <Section title="PROPS">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {Object.entries(PROP_DEFS)
+                    .filter(([, def]) => def.category === propCategory)
+                    .map(([id, def]) => {
+                      const active = activePropType === id;
+                      return (
+                        <button key={id} onClick={() => setActivePropType(id)} style={{
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                          border: `1px solid ${active ? P.accent : P.border}`,
+                          padding: '6px 10px', cursor: 'pointer', width: '100%',
+                        }}>
+                          <span style={{
+                            width: 10, height: 10, borderRadius: '50%',
+                            background: def.color, flexShrink: 0,
+                          }} />
+                          <span style={{
+                            fontFamily: 'monospace', fontSize: 10,
+                            color: active ? P.accent : P.muted, letterSpacing: 1,
+                          }}>
+                            {def.label.toUpperCase()}
+                          </span>
+                          <span style={{ marginLeft: 'auto', fontSize: 8, color: P.muted }}>
+                            {def.anchor}
+                          </span>
+                        </button>
+                      );
+                    })}
+                </div>
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                  CLICK to place · SHIFT+CLICK to delete<br />
+                  CLICK marker to select · DEL to remove
+                </div>
+              </Section>
+
+              <Section title="VIEW">
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button onClick={() => setShowProps(v => !v)} style={{
+                    flex: 1,
+                    background: showProps ? 'rgba(0,212,255,0.12)' : 'transparent',
+                    border: `1px solid ${showProps ? P.accent : P.border}`,
+                    color: showProps ? P.accent : P.muted,
+                    fontFamily: 'monospace', fontSize: 9, padding: '5px 0', cursor: 'pointer',
+                  }}>
+                    {showProps ? 'HIDE PROPS' : 'SHOW PROPS'}
+                  </button>
+                  <button onClick={() => setShowPropBounds(v => !v)} style={{
+                    flex: 1,
+                    background: showPropBounds ? 'rgba(0,212,255,0.12)' : 'transparent',
+                    border: `1px solid ${showPropBounds ? P.accent : P.border}`,
+                    color: showPropBounds ? P.accent : P.muted,
+                    fontFamily: 'monospace', fontSize: 9, padding: '5px 0', cursor: 'pointer',
+                  }}>
+                    BOUNDS
+                  </button>
+                </div>
+              </Section>
+
+              {selectedPropId && zone?.props && (
+                <Section title="SELECTED PROP">
+                  {(() => {
+                    const prop = zone.props.find(p => p.id === selectedPropId);
+                    if (!prop) return null;
+                    const def = PROP_DEFS[prop.type];
+                    return (
+                      <>
+                        <FieldRow label="TYPE">
+                          <span style={{ fontSize: 11, color: P.text }}>{def?.label ?? prop.type}</span>
+                        </FieldRow>
+                        <FieldRow label="POS">
+                          <span style={{ fontSize: 11, color: P.text }}>{prop.x},{prop.y}</span>
+                        </FieldRow>
+                        <FieldRow label="ROT">
+                          <input style={{ ...inputStyle, width: 60 }} type="number" step="0.1"
+                            value={(prop.rotation ?? 0).toFixed(2)}
+                            onChange={e => {
+                              const v = parseFloat(e.target.value);
+                              setZone(prev => {
+                                if (!prev) return prev;
+                                return { ...prev, props: prev.props.map(p => p.id === selectedPropId ? { ...p, rotation: v } : p) };
+                              });
+                              setIsDirty(true);
+                            }} />
+                        </FieldRow>
+                        <FieldRow label="SCALE">
+                          <input style={{ ...inputStyle, width: 60 }} type="number" step="0.05" min="0.1" max="3"
+                            value={(prop.scale ?? 1).toFixed(2)}
+                            onChange={e => {
+                              const v = parseFloat(e.target.value);
+                              setZone(prev => {
+                                if (!prev) return prev;
+                                return { ...prev, props: prev.props.map(p => p.id === selectedPropId ? { ...p, scale: v } : p) };
+                              });
+                              setIsDirty(true);
+                            }} />
+                        </FieldRow>
+                        <button onClick={() => deleteProp(selectedPropId)}
+                          style={{ ...btnStyle(P.warn), width: '100%', marginTop: 2 }}>
+                          DELETE PROP
+                        </button>
+                      </>
+                    );
+                  })()}
+                </Section>
+              )}
+            </>
+          )}
+
+          {/* ── SURFACE MODE ─────────────────────────────────────────────────── */}
+          {editorMode === 'surface' && (
+            <>
+              <Section title="SURFACE OVERLAY">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {Object.entries(SURFACE_TYPES).map(([id, def]) => {
+                    const active = activeSurface === id;
+                    return (
+                      <button key={id} onClick={() => setActiveSurface(id)} style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        padding: '6px 10px', cursor: 'pointer', width: '100%',
+                      }}>
+                        <span style={{
+                          width: 18, height: 12, flexShrink: 0, borderRadius: 2,
+                          background: def.color, border: `1px solid ${P.border}`,
+                        }} />
+                        <span style={{
+                          fontFamily: 'monospace', fontSize: 10,
+                          color: active ? P.accent : P.muted, letterSpacing: 1,
+                        }}>
+                          {def.label.toUpperCase()}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <FieldRow label="SIZE">
+                  <div style={{ display: 'flex', gap: 4, flex: 1 }}>
+                    {[1, 3, 5].map(s => (
+                      <button key={s} onClick={() => setSurfaceBrushSize(s)} style={{
+                        flex: 1,
+                        background: surfaceBrushSize === s ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        border: `1px solid ${surfaceBrushSize === s ? P.accent : P.border}`,
+                        color: surfaceBrushSize === s ? P.accent : P.muted,
+                        fontFamily: 'monospace', fontSize: 9,
+                        padding: '5px 0', cursor: 'pointer',
+                      }}>
+                        {s}×{s}
+                      </button>
+                    ))}
+                  </div>
+                </FieldRow>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button onClick={() => setShowSurface(v => !v)} style={{
+                    flex: 1,
+                    background: showSurface ? 'rgba(0,212,255,0.12)' : 'transparent',
+                    border: `1px solid ${showSurface ? P.accent : P.border}`,
+                    color: showSurface ? P.accent : P.muted,
+                    fontFamily: 'monospace', fontSize: 9, padding: '5px 0', cursor: 'pointer',
+                  }}>
+                    {showSurface ? 'VISIBLE' : 'HIDDEN'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      commitHistory();
+                      setZone(prev => prev ? { ...prev, surface: {} } : prev);
+                      setIsDirty(true);
+                    }}
+                    style={{ ...btnStyle(P.warn), fontSize: 9, padding: '5px 10px' }}
+                  >
+                    CLEAR ALL
+                  </button>
+                </div>
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                  CLICK/DRAG to paint<br />
+                  SHIFT+CLICK to erase tile<br />
+                  Multiple overlays per tile supported
+                </div>
+              </Section>
+            </>
+          )}
+
+          {/* ── PREFABS MODE ─────────────────────────────────────────────────── */}
+          {editorMode === 'prefabs' && (
+            <>
+              <Section title="PREFABS">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {Object.entries(PREFABS).map(([id, pfb]) => {
+                    const active = activePrefab === id;
+                    return (
+                      <button key={id} onClick={() => setActivePrefab(id)} style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        padding: '7px 10px', cursor: 'pointer', width: '100%',
+                      }}>
+                        <span style={{ fontFamily: 'monospace', fontSize: 10,
+                          color: active ? P.accent : P.muted, letterSpacing: 1 }}>
+                          {pfb.label?.toUpperCase() ?? id}
+                        </span>
+                        <span style={{ marginLeft: 'auto', fontSize: 8, color: P.muted }}>
+                          {pfb.width}×{pfb.height}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <FieldRow label="ROTATE">
+                  <div style={{ display: 'flex', gap: 4, flex: 1 }}>
+                    {[0, 1, 2, 3].map(r => (
+                      <button key={r} onClick={() => setPrefabRotation(r)} style={{
+                        flex: 1,
+                        background: prefabRotation === r ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        border: `1px solid ${prefabRotation === r ? P.accent : P.border}`,
+                        color: prefabRotation === r ? P.accent : P.muted,
+                        fontFamily: 'monospace', fontSize: 9,
+                        padding: '5px 0', cursor: 'pointer',
+                      }}>
+                        {r * 90}°
+                      </button>
+                    ))}
+                  </div>
+                </FieldRow>
+
+                <FieldRow label="MODE">
+                  <div style={{ display: 'flex', gap: 4, flex: 1 }}>
+                    {[['stamp', 'STAMP'], ['merge', 'MERGE']].map(([id, label]) => (
+                      <button key={id} onClick={() => setPrefabStampMode(id)} style={{
+                        flex: 1,
+                        background: prefabStampMode === id ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        border: `1px solid ${prefabStampMode === id ? P.accent : P.border}`,
+                        color: prefabStampMode === id ? P.accent : P.muted,
+                        fontFamily: 'monospace', fontSize: 9,
+                        padding: '5px 0', cursor: 'pointer',
+                      }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </FieldRow>
+
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                  CLICK tile to stamp · R to rotate<br />
+                  MERGE = only fill empty tiles<br />
+                  Preview shown on hover
+                </div>
+              </Section>
+            </>
+          )}
+
           {/* ── REFERENCE IMAGE ──────────────────────────────────────────────── */}
           {zone && (
             <Section title="REFERENCE IMAGE">
@@ -1995,6 +2676,26 @@ export default function MapEditorTab({ config }) {
               }}
             >
               {rotationAngle ? `${rotationAngle * 90}°` : 'ROTATE'}
+            </button>
+            <button
+              onClick={() => {
+                if (showFOV && fovOrigin) {
+                  setShowFOV(false); setFovOrigin(null);
+                } else if (zone && hoveredTile) {
+                  setFovOrigin({ x: hoveredTile.col, y: hoveredTile.row });
+                  setShowFOV(true);
+                } else {
+                  setShowFOV(v => !v);
+                }
+              }}
+              title={showFOV ? 'Click to clear FOV debug (shows vision from hovered tile)' : 'Hover a tile and click to show FOV from that position'}
+              style={{
+                ...toolbarBtnStyle,
+                color:  showFOV ? '#f0d040' : P.muted,
+                border: `1px solid ${showFOV ? '#f0d040' : P.border}`,
+              }}
+            >
+              FOV
             </button>
             <button
               onClick={handleScreenshot}
