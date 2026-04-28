@@ -1453,6 +1453,28 @@ export default function MapEditorTab({ config }) {
     setFutureLen(futureRef.current.length);
   }, []);
 
+  // ── deleteProp / deleteLight declared HERE so the keydown useEffect dep array
+  // ── below can reference them without TDZ (dep arrays are evaluated immediately)
+  const deleteProp = useCallback((id) => {
+    commitHistory();
+    setZone(prev => {
+      if (!prev) return prev;
+      return { ...prev, props: (prev.props ?? []).filter(p => p.id !== id) };
+    });
+    setSelectedPropId(null);
+    setIsDirty(true);
+  }, [commitHistory]);
+
+  const deleteLight = useCallback((id) => {
+    commitHistory();
+    setZone(prev => {
+      if (!prev) return prev;
+      return { ...prev, lights: (prev.lights ?? []).filter(l => l.id !== id) };
+    });
+    setSelectedLightId(null);
+    setIsDirty(true);
+  }, [commitHistory]);
+
   // ── Keyboard shortcuts ────────────────────────────────────────────────────────
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -1786,16 +1808,6 @@ export default function MapEditorTab({ config }) {
     setIsDirty(true);
   }, [activePropType]);
 
-  const deleteProp = useCallback((id) => {
-    commitHistory();
-    setZone(prev => {
-      if (!prev) return prev;
-      return { ...prev, props: (prev.props ?? []).filter(p => p.id !== id) };
-    });
-    setSelectedPropId(null);
-    setIsDirty(true);
-  }, [commitHistory]);
-
   // ── Light CRUD (zone.lights) ──────────────────────────────────────────────────
   const placeLight = useCallback((row, col) => {
     const preset = LIGHT_PRESETS[activeLightTypeRef.current] ?? LIGHT_PRESETS.torch;
@@ -1817,16 +1829,6 @@ export default function MapEditorTab({ config }) {
       return { ...prev, lights: [...(prev.lights ?? []), light] };
     });
     setSelectedLightId(id);
-    setIsDirty(true);
-  }, [commitHistory]);
-
-  const deleteLight = useCallback((id) => {
-    commitHistory();
-    setZone(prev => {
-      if (!prev) return prev;
-      return { ...prev, lights: (prev.lights ?? []).filter(l => l.id !== id) };
-    });
-    setSelectedLightId(null);
     setIsDirty(true);
   }, [commitHistory]);
 
