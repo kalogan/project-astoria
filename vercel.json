@@ -1,9 +1,8 @@
 {
   "version": 2,
-  "routes": [
-    { "src": "/tools/tile-editor",       "dest": "/tools/tile-editor/index.html" },
-    { "src": "/tools/tile-editor/(.*)",  "dest": "/tools/tile-editor/$1" },
-    { "src": "/",                        "dest": "/client/index.html" },
-    { "src": "/(.*)",                    "dest": "/client/$1" }
+  "rewrites": [
+    { "source": "/tools/tile-editor",  "destination": "/tools/tile-editor/index.html" },
+    { "source": "/",                   "destination": "/client/index.html" },
+    { "source": "/:path*",             "destination": "/client/:path*" }
   ]
 }
