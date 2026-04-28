@@ -1102,6 +1102,13 @@ export default function MapEditorTab({ config }) {
   const fpsHistoryRef        = useRef([]);
   const perfDebugRef         = useRef(false);
 
+  // ── Refs for lighting-authoring + scatter sub-tool (must live here, before ────
+  // ── any useEffect/useLayoutEffect that might close over them) ────────────────
+  const activeLightTypeRef  = useRef(activeLightType);
+  const scatterDensityRef   = useRef(scatterDensity);
+  const scatterRadiusRef    = useRef(scatterRadius);
+  const propToolRef         = useRef(propTool);
+
   useEffect(() => { cameraRef.current            = camera; },           [camera]);
   useEffect(() => { zoneRef.current              = zone; },             [zone]);
   useEffect(() => { editorModeRef.current        = editorMode; },       [editorMode]);
@@ -1116,11 +1123,7 @@ export default function MapEditorTab({ config }) {
   useEffect(() => { enableCutawayRef.current       = enableCutaway; },     [enableCutaway]);
   useEffect(() => { perfDebugRef.current           = perfDebug; },         [perfDebug]);
 
-  // Stable refs for new fields
-  const activeLightTypeRef  = useRef(activeLightType);
-  const scatterDensityRef   = useRef(scatterDensity);
-  const scatterRadiusRef    = useRef(scatterRadius);
-  const propToolRef         = useRef(propTool);
+  // Sync lighting-authoring + scatter refs
   useEffect(() => { activeLightTypeRef.current = activeLightType; }, [activeLightType]);
   useEffect(() => { scatterDensityRef.current  = scatterDensity; },  [scatterDensity]);
   useEffect(() => { scatterRadiusRef.current   = scatterRadius; },   [scatterRadius]);
