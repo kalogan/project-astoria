@@ -23,6 +23,8 @@ export const TILE_TYPES = {
   DIRT:  11,
   PATH:  12,
   STONE: 13,
+  // Water
+  WATER: 14,
 };
 
 export const TILE_LABELS = {
@@ -33,6 +35,7 @@ export const TILE_LABELS = {
   [TILE_TYPES.DIRT]:  'Dirt',
   [TILE_TYPES.PATH]:  'Path',
   [TILE_TYPES.STONE]: 'Stone',
+  [TILE_TYPES.WATER]: 'Water',
 };
 
 export const T_LABELS = {
@@ -58,7 +61,7 @@ export const DEFAULT_CONFIG = {
     FLOOR_NEAR_PATH: 0.55,
     PATH_NEAR_FLOOR: 0.45,
   },
-  tileHeight: { 1: 0.2, 2: 1.5, 3: 0.2, 10: 0.2, 11: 0.2, 12: 0.2, 13: 0.2 },
+  tileHeight: { 1: 0.2, 2: 1.5, 3: 0.2, 10: 0.2, 11: 0.2, 12: 0.2, 13: 0.2, 14: 0.2 },
 };
 
 // ── Pure utilities ─────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useCallback, useState } from 'react';
 import { P, TILE_TYPES, TILE_LABELS, deepClone, pickTileColor, drawIsoTile, btnStyle } from './constants';
 import { gridToScreen, screenToGrid, gridToWorld, worldToGrid } from './isoUtils';
 import {
@@ -9,6 +9,10 @@ import {
   HEIGHT_SCALE, MAX_HEIGHT, MIN_HEIGHT,
   getH, ensureHeights, applyHeightBrightness, shadowOpacity,
 } from './heightMap';
+import {
+  WATER_TYPE, drawWaterTile, drawWaterfallFace, drawSplashEffect, isWaterTile,
+} from './waterTile';
+import { drawBridgeSegment, drawDockSegment, DOCK_DIR_DELTAS } from './structureTile';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TW             = 64;
@@ -21,12 +25,23 @@ const HISTORY_LIMIT  = 50;
 
 // ── Entity palette ─────────────────────────────────────────────────────────────
 const ENTITY_PALETTE = [
-  { type: 'npc',   subtype: 'greeter',  label: 'NPC: Greeter',    color: '#4fc38a', icon: 'N', defaultConfig: { dialogue: 'intro_greeter' } },
-  { type: 'npc',   subtype: 'merchant', label: 'NPC: Merchant',   color: '#f5c842', icon: 'N', defaultConfig: { shopId: '' } },
-  { type: 'enemy', subtype: 'slime',    label: 'Enemy: Slime',    color: '#e74c3c', icon: 'E', defaultConfig: { level: 1 } },
-  { type: 'enemy', subtype: 'skeleton', label: 'Enemy: Skeleton', color: '#c0392b', icon: 'E', defaultConfig: { level: 2 } },
-  { type: 'spawn', subtype: 'player',   label: 'Spawn Point',     color: '#3498db', icon: 'S', defaultConfig: {} },
+  { type: 'npc',       subtype: 'greeter',  label: 'NPC: Greeter',    color: '#4fc38a', icon: 'N', defaultConfig: { dialogue: 'intro_greeter' } },
+  { type: 'npc',       subtype: 'merchant', label: 'NPC: Merchant',   color: '#f5c842', icon: 'N', defaultConfig: { shopId: '' } },
+  { type: 'enemy',     subtype: 'slime',    label: 'Enemy: Slime',    color: '#e74c3c', icon: 'E', defaultConfig: { level: 1 } },
+  { type: 'enemy',     subtype: 'skeleton', label: 'Enemy: Skeleton', color: '#c0392b', icon: 'E', defaultConfig: { level: 2 } },
+  { type: 'spawn',     subtype: 'player',   label: 'Spawn Point',     color: '#3498db', icon: 'S', defaultConfig: {} },
+  { type: 'structure', subtype: 'bridge',   label: 'Bridge',          color: '#a07840', icon: 'B', defaultConfig: { orientation: 'ew', length: '3' } },
+  { type: 'structure', subtype: 'dock',     label: 'Dock',            color: '#8b6030', icon: 'D', defaultConfig: { orientation: 'south', length: '3' } },
+  { type: 'structure', subtype: 'pier',     label: 'Pier',            color: '#7a5028', icon: 'P', defaultConfig: { orientation: 'south', length: '5' } },
 ];
+
+// ── Water flow helper ──────────────────────────────────────────────────────────
+// Ensures zone.waterFlow exists and matches tile dimensions.
+function ensureWaterFlow(zone, rows, cols) {
+  const wf = zone.waterFlow;
+  if (wf && wf.length === rows && (wf[0]?.length ?? 0) === cols) return wf;
+  return Array.from({ length: rows }, () => Array(cols).fill(null));
+}
 
 const FACING_OPTIONS = ['north', 'south', 'east', 'west'];
 
@@ -169,21 +184,25 @@ function drawShadowQuadrant(ctx, sx, sy, TW, TH, dir, opacity) {
 // ── Canvas draw ───────────────────────────────────────────────────────────────
 //
 //  overlayOpts: { refImage, refOpacity, refVisible, showGrid, debugMode,
-//                 heights, showHeightDebug }
+//                 heights, showHeightDebug, waterFlow, animOffset }
 //
-//  Draw order (back → front):
-//    1. Background fill
-//    2. Tile meshes + shadows + height debug numbers  (world space)
-//    3. Reference overlay                             (world space, above tiles)
-//    4. Grid lines                                    (world space)
-//    5. Hover diamond                                 (screen space)
-//    6. Entity markers                                (screen space)
+//  Draw order (back → front) — world space block:
+//    1. Tiles (terrain/water/legacy) — painter's order with height
+//    2. Waterfall faces              — overlaid on higher water side faces
+//    3. Splash effects               — drawn after all tiles (on top)
+//    4. Structures                   — bridges, docks, piers above water
+//    5. Reference image overlay
+//    6. Grid lines
+//  Screen space:
+//    7. Hover diamond
+//    8. Entity markers (NPC/enemy/spawn)
 
 function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntityId, editorMode, overlayOpts) {
   const {
     refImage = null, refOpacity = 0.4, refVisible = false,
     showGrid = false, debugMode = false,
     heights = null, showHeightDebug = false,
+    waterFlow = null, animOffset = 0,
   } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
@@ -225,35 +244,53 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   ctx.setTransform(zoom, 0, 0, zoom, panX, panY);
 
   // ── 1. Tiles ─────────────────────────────────────────────────────────────────
+  const splashList = []; // collected during tile loop, drawn in pass 3
+
   for (const [r, c] of cells) {
     const type   = tiles[r][c];
     const h      = getH(heights, r, c);
     const { x: sx, y: syBase } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
     const sy     = syBase - h * HEIGHT_SCALE;
-    // Cliff extension: how many px the side faces drop below ground on each side
     const cliffR = Math.max(0, h - getH(heights, r,     c + 1)) * HEIGHT_SCALE;
     const cliffL = Math.max(0, h - getH(heights, r + 1, c    )) * HEIGHT_SCALE;
 
-    if (isTerrainTile(type)) {
+    if (isWaterTile(type)) {
+      drawWaterTile(ctx, sx, sy, TW, TH, r, c, tiles, heights, waterFlow,
+                    animOffset, cliffR, cliffL);
+      // ── Waterfall detection (right face: toward col+1)
+      if (c + 1 < cols && isWaterTile(tiles[r][c + 1])) {
+        const hR = getH(heights, r, c + 1);
+        if (h > hR) {
+          drawWaterfallFace(ctx, sx, sy, TW, TH, 'right', h - hR, r, c, animOffset);
+          splashList.push({ row: r, col: c + 1, h: hR });
+        }
+      }
+      // ── Waterfall detection (left face: toward row+1)
+      if (r + 1 < rows && isWaterTile(tiles[r + 1][c])) {
+        const hL = getH(heights, r + 1, c);
+        if (h > hL) {
+          drawWaterfallFace(ctx, sx, sy, TW, TH, 'left', h - hL, r, c, animOffset);
+          splashList.push({ row: r + 1, col: c, h: hL });
+        }
+      }
+    } else if (isTerrainTile(type)) {
       drawTerrainTile(ctx, sx, sy, TW, TH, type, r, c, tiles, debugMode, h, cliffR, cliffL);
     } else {
       const tColor = applyHeightBrightness(pickTileColor(type, r, c, tiles, config), h);
       drawIsoTile(ctx, sx, sy, TW, TH, tColor, type, config, cliffR, cliffL);
     }
 
-    // Shadow from higher uphill neighbors
-    // dir 0: uphill at (r-1, c) — casts shadow on the top-right quadrant
+    // Height-based shadow from uphill neighbours (all tile types)
     if (r > 0) {
       const diff = getH(heights, r - 1, c) - h;
       if (diff > 0) drawShadowQuadrant(ctx, sx, sy, TW, TH, 0, shadowOpacity(diff));
     }
-    // dir 3: uphill at (r, c-1) — casts shadow on the top-left quadrant
     if (c > 0) {
       const diff = getH(heights, r, c - 1) - h;
       if (diff > 0) drawShadowQuadrant(ctx, sx, sy, TW, TH, 3, shadowOpacity(diff));
     }
 
-    // Height debug: show elevation number on tiles with h > 0
+    // Height debug overlay
     if (showHeightDebug && h > 0) {
       const numSize = Math.max(7, Math.round(TH * 0.38));
       ctx.save();
@@ -266,6 +303,48 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
       ctx.fillStyle    = 'rgba(255,255,255,0.82)';
       ctx.fillText(String(h), sx, sy + TH * 0.5);
       ctx.restore();
+    }
+  }
+
+  // ── 2. Splash effects (on top of all tiles) ───────────────────────────────────
+  for (const { row, col, h } of splashList) {
+    const { x: sx, y: syBase } = gridToScreen(row, col, ISO_ORIGIN, TW, TH);
+    const sy = syBase - h * HEIGHT_SCALE;
+    drawSplashEffect(ctx, sx, sy, TW, TH, row, col, animOffset);
+  }
+
+  // ── 3. Structures (bridges, docks, piers) ─────────────────────────────────────
+  const structures = (zone.entities ?? []).filter(e => e.type === 'structure');
+  for (const entity of structures) {
+    const grid = worldToGrid(entity.position.x, entity.position.y, rows, cols);
+
+    if (entity.subtype === 'bridge') {
+      const ori  = entity.config?.orientation ?? 'ew';
+      const len  = Math.max(1, parseInt(entity.config?.length ?? 3));
+      const half = Math.floor(len / 2);
+      for (let i = -half; i < len - half; i++) {
+        const br = ori === 'ns' ? grid.row + i : grid.row;
+        const bc = ori === 'ew' ? grid.col + i : grid.col;
+        if (br < 0 || br >= rows || bc < 0 || bc >= cols) continue;
+        const bh = getH(heights, br, bc);
+        const { x: bsx, y: bsyBase } = gridToScreen(br, bc, ISO_ORIGIN, TW, TH);
+        drawBridgeSegment(ctx, bsx, bsyBase - bh * HEIGHT_SCALE, TW, TH, ori, br, bc);
+      }
+    }
+
+    if (entity.subtype === 'dock' || entity.subtype === 'pier') {
+      const ori       = entity.config?.orientation ?? 'south';
+      const len       = Math.max(1, parseInt(entity.config?.length ?? 3));
+      const [dr, dc]  = DOCK_DIR_DELTAS[ori] ?? [1, 0];
+      for (let i = 0; i <= len; i++) {
+        const dr_ = grid.row + dr * i;
+        const dc_ = grid.col + dc * i;
+        if (dr_ < 0 || dr_ >= rows || dc_ < 0 || dc_ >= cols) break;
+        const dh = getH(heights, dr_, dc_);
+        const { x: dsx, y: dsyBase } = gridToScreen(dr_, dc_, ISO_ORIGIN, TW, TH);
+        drawDockSegment(ctx, dsx, dsyBase - dh * HEIGHT_SCALE, TW, TH, ori,
+                        i === 0, i === len ? 'tip' : i, dr_, dc_);
+      }
     }
   }
 
@@ -352,6 +431,7 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   ctx.font         = 'bold 9px monospace';
 
   for (const entity of entities) {
+    if (entity.type === 'structure') continue; // rendered in world-space pass above
     const grid = worldToGrid(entity.position.x, entity.position.y, rows, cols);
     const h    = getH(heights, grid.row, grid.col);
     const { x: wx, y: wyBase } = gridToScreen(grid.row, grid.col, ISO_ORIGIN, TW, TH);
@@ -464,8 +544,9 @@ export default function MapEditorTab({ config }) {
   const [refImage,        setRefImage]        = useState(null);  // HTMLImageElement | null
   const [refOpacity,      setRefOpacity]      = useState(0.4);
   const [refVisible,      setRefVisible]      = useState(true);
-  const [showHeightDebug, setShowHeightDebug] = useState(false); // show h numbers
-  const [rotationAngle,   setRotationAngle]   = useState(0);     // 0|1|2|3 (×90°)
+  const [showHeightDebug,  setShowHeightDebug]  = useState(false); // show h numbers
+  const [rotationAngle,    setRotationAngle]    = useState(0);     // 0|1|2|3 (×90°)
+  const [selectedFlowDir,  setSelectedFlowDir]  = useState(null);  // null|'north'|'east'|'south'|'west'
 
   // ── History ──────────────────────────────────────────────────────────────────
   const [historyLen, setHistoryLen] = useState(0);
@@ -492,6 +573,10 @@ export default function MapEditorTab({ config }) {
   const brushSizeRef         = useRef(brushSize);
   const heightDeltaRef       = useRef(1);    // +1 raise / -1 lower, set on mousedown
   const rotationAngleRef     = useRef(rotationAngle);
+  const selectedFlowDirRef   = useRef(selectedFlowDir);
+  const animOffsetRef        = useRef(0);   // ever-increasing time for water animation
+  const animRafRef           = useRef(null);
+  const drawOptsRef          = useRef(null); // latest draw params for RAF loop
 
   useEffect(() => { cameraRef.current            = camera; },           [camera]);
   useEffect(() => { zoneRef.current              = zone; },             [zone]);
@@ -502,6 +587,48 @@ export default function MapEditorTab({ config }) {
   useEffect(() => { brushToolRef.current         = brushTool; },        [brushTool]);
   useEffect(() => { brushSizeRef.current         = brushSize; },        [brushSize]);
   useEffect(() => { rotationAngleRef.current     = rotationAngle; },    [rotationAngle]);
+  useEffect(() => { selectedFlowDirRef.current  = selectedFlowDir; },  [selectedFlowDir]);
+
+  // ── Keep draw opts mirror current on every render (for RAF loop) ─────────────
+  useLayoutEffect(() => {
+    drawOptsRef.current = {
+      zone, hoveredTile, camera, config, selectedEntityId, editorMode,
+      overlayOpts: {
+        refImage, refOpacity, refVisible, showGrid, debugMode,
+        heights:        zone?.heights   ?? null,
+        showHeightDebug,
+        waterFlow:      zone?.waterFlow ?? null,
+      },
+    };
+  }); // no deps — runs after every render
+
+  // ── Water animation RAF loop ─────────────────────────────────────────────────
+  // Continuously redraws the canvas (with advancing animOffset) only when the
+  // zone contains water tiles.  Non-water maps pay essentially zero cost.
+  useEffect(() => {
+    let lastTime = performance.now();
+    const tick = (now) => {
+      const dt  = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime  = now;
+
+      const hasWater = zoneRef.current?.tiles?.some(row => row.some(t => t === WATER_TYPE));
+      if (hasWater) {
+        animOffsetRef.current += dt * 0.35;
+        const canvas = canvasRef.current;
+        const opts   = drawOptsRef.current;
+        if (canvas && opts?.zone) {
+          drawMapCanvas(
+            canvas, opts.zone, opts.hoveredTile, opts.camera, opts.config,
+            opts.selectedEntityId, opts.editorMode,
+            { ...opts.overlayOpts, animOffset: animOffsetRef.current },
+          );
+        }
+      }
+      animRafRef.current = requestAnimationFrame(tick);
+    };
+    animRafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animRafRef.current);
+  }, []); // empty — RAF always runs, but only draws when water present
 
   // ── Canvas resize ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -519,7 +646,9 @@ export default function MapEditorTab({ config }) {
     return () => ro.disconnect();
   }, []);
 
-  // ── Canvas redraw ────────────────────────────────────────────────────────────
+  // ── Canvas redraw (reactive — fires on state changes) ────────────────────────
+  // The RAF loop handles continuous animation; this ensures immediate response
+  // to non-animation state changes (tile paint, entity move, zoom, etc.).
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -528,7 +657,9 @@ export default function MapEditorTab({ config }) {
       selectedEntityId, editorMode,
       {
         refImage, refOpacity, refVisible, showGrid, debugMode,
-        heights: zone?.heights ?? null, showHeightDebug,
+        heights:        zone?.heights   ?? null, showHeightDebug,
+        waterFlow:      zone?.waterFlow ?? null,
+        animOffset:     animOffsetRef.current,
       },
     );
   }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
@@ -717,21 +848,50 @@ export default function MapEditorTab({ config }) {
 
   // ── Tile tool ─────────────────────────────────────────────────────────────────
   // Handles paint (with brush size), erase (with brush size), and fill.
-  // Uses spread-replace for tiles only — cheaper than deepClone for large grids.
+  // When painting water, also writes flow direction into zone.waterFlow.
   const applyTileTool = useCallback((row, col) => {
     const tool     = brushToolRef.current;
     const size     = brushSizeRef.current;
     const tileType = tool === 'erase' ? 0 : selectedTileTypeRef.current;
+    const isWater  = tileType === WATER_TYPE;
+    const flowDir  = isWater ? selectedFlowDirRef.current : null;
 
     setZone(prev => {
       if (!prev) return prev;
+      const rows = prev.tiles.length;
+      const cols = prev.tiles[0].length;
+      let newTiles;
+
       if (tool === 'fill') {
-        const newTiles = floodFill(prev.tiles, row, col, tileType);
+        newTiles = floodFill(prev.tiles, row, col, tileType);
         if (!newTiles) return prev;
-        return { ...prev, tiles: newTiles };
+      } else {
+        newTiles = applyBrush(prev.tiles, row, col, tileType, size);
+        if (!newTiles) return prev;
       }
-      const newTiles = applyBrush(prev.tiles, row, col, tileType, size);
-      if (!newTiles) return prev;
+
+      // Keep waterFlow in sync when painting/erasing water tiles
+      if (isWater || tool === 'erase') {
+        const curFlow = ensureWaterFlow(prev, rows, cols);
+        const newFlow = curFlow.map(r => [...r]);
+        const radius  = Math.floor(size / 2);
+
+        if (tool === 'fill') {
+          for (let r = 0; r < rows; r++)
+            for (let c = 0; c < cols; c++)
+              if (prev.tiles[r][c] !== newTiles[r][c])
+                newFlow[r][c] = isWater ? flowDir : null;
+        } else {
+          for (let dr = -radius; dr <= radius; dr++)
+            for (let dc = -radius; dc <= radius; dc++) {
+              const r = row + dr, c = col + dc;
+              if (r >= 0 && r < rows && c >= 0 && c < cols)
+                newFlow[r][c] = tool === 'erase' ? null : flowDir;
+            }
+        }
+        return { ...prev, tiles: newTiles, waterFlow: newFlow };
+      }
+
       return { ...prev, tiles: newTiles };
     });
     setIsDirty(true);
@@ -1135,7 +1295,6 @@ export default function MapEditorTab({ config }) {
                         border: `1px solid ${active ? P.accent : P.border}`,
                         padding: '7px 10px', cursor: 'pointer', width: '100%',
                       }}>
-                        {/* Two-tone swatch: shows base + slight variation */}
                         <span style={{
                           width: 20, height: 14, flexShrink: 0, borderRadius: 2,
                           border: `1px solid ${P.border}`,
@@ -1155,8 +1314,65 @@ export default function MapEditorTab({ config }) {
                       </button>
                     );
                   })}
+
+                  {/* Water tile */}
+                  {(() => {
+                    const active = selectedTileType === WATER_TYPE;
+                    return (
+                      <button onClick={() => setSelectedTileType(WATER_TYPE)} style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        padding: '7px 10px', cursor: 'pointer', width: '100%',
+                      }}>
+                        <span style={{
+                          width: 20, height: 14, flexShrink: 0, borderRadius: 2,
+                          border: `1px solid ${P.border}`,
+                          background: 'linear-gradient(135deg, #3078af 50%, #2060a0 50%)',
+                        }} />
+                        <span style={{
+                          fontFamily: 'monospace', fontSize: 10,
+                          color: active ? P.accent : P.text, letterSpacing: 2,
+                        }}>
+                          WATER
+                        </span>
+                        {active && (
+                          <span style={{ marginLeft: 'auto', fontSize: 9, color: P.accent }}>
+                            ACTIVE
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })()}
                 </div>
               </Section>
+
+              {/* Flow direction — shown when Water is selected */}
+              {selectedTileType === WATER_TYPE && (
+                <Section title="WATER FLOW">
+                  <div style={{ display: 'flex', gap: 3 }}>
+                    {[null, 'north', 'east', 'south', 'west'].map(dir => {
+                      const active = selectedFlowDir === dir;
+                      const label  = dir ? dir.slice(0, 1).toUpperCase() : '—';
+                      return (
+                        <button key={dir ?? 'none'} onClick={() => setSelectedFlowDir(dir)} style={{
+                          flex: 1,
+                          background: active ? 'rgba(0,212,255,0.14)' : 'transparent',
+                          border: `1px solid ${active ? P.accent : P.border}`,
+                          color: active ? P.accent : P.muted,
+                          fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
+                          padding: '5px 2px', cursor: 'pointer',
+                        }}>
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1 }}>
+                    — = still water · N/E/S/W = river flow
+                  </div>
+                </Section>
+              )}
 
               {/* Legacy game tile palette (secondary) */}
               <Section title="LEGACY TILES">
@@ -1306,15 +1522,48 @@ export default function MapEditorTab({ config }) {
                       ))}
                     </select>
                   </FieldRow>
-                  {Object.entries(selectedEntity.config ?? {}).map(([key, val]) => (
-                    <FieldRow key={key} label={key.toUpperCase()}>
-                      <input
-                        style={inputStyle}
-                        value={val ?? ''}
-                        onChange={e => updateEntityConfig(selectedEntity.id, key, e.target.value)}
-                      />
-                    </FieldRow>
-                  ))}
+                  {selectedEntity.type === 'structure' && (
+                    <>
+                      <FieldRow label="ORIENT">
+                        <select
+                          style={selectStyle}
+                          value={selectedEntity.config?.orientation ?? (selectedEntity.subtype === 'bridge' ? 'ew' : 'south')}
+                          onChange={e => updateEntityConfig(selectedEntity.id, 'orientation', e.target.value)}
+                        >
+                          {selectedEntity.subtype === 'bridge'
+                            ? [['ew', 'East ↔ West'], ['ns', 'North ↕ South']].map(([v, l]) => (
+                                <option key={v} value={v}>{l}</option>
+                              ))
+                            : ['north', 'south', 'east', 'west'].map(d => (
+                                <option key={d} value={d}>{d.charAt(0).toUpperCase() + d.slice(1)}</option>
+                              ))
+                          }
+                        </select>
+                      </FieldRow>
+                      <FieldRow label="LENGTH">
+                        <input
+                          style={{ ...inputStyle, width: 48 }}
+                          type="number" min={1} max={12}
+                          value={selectedEntity.config?.length ?? 3}
+                          onChange={e => updateEntityConfig(selectedEntity.id, 'length', e.target.value)}
+                        />
+                        <span style={{ fontSize: 9, color: P.muted, letterSpacing: 1, marginLeft: 6 }}>
+                          tiles
+                        </span>
+                      </FieldRow>
+                    </>
+                  )}
+                  {Object.entries(selectedEntity.config ?? {})
+                    .filter(([key]) => selectedEntity.type !== 'structure' || !['orientation','length'].includes(key))
+                    .map(([key, val]) => (
+                      <FieldRow key={key} label={key.toUpperCase()}>
+                        <input
+                          style={inputStyle}
+                          value={val ?? ''}
+                          onChange={e => updateEntityConfig(selectedEntity.id, key, e.target.value)}
+                        />
+                      </FieldRow>
+                    ))}
                   <button
                     onClick={() => deleteEntity(selectedEntity.id)}
                     style={{ ...btnStyle(P.warn), width: '100%', marginTop: 2 }}
