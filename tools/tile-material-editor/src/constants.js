@@ -137,7 +137,11 @@ export function pickTileColor(type, row, col, grid, config) {
 // Draws a single isometric tile (walls get side faces + elevated top face,
 // flat tiles get shallow side faces).  Used by MapEditorTab's canvas renderer.
 
-export function drawIsoTile(ctx, sx, sy, TW, TH, topColor, type, config) {
+/**
+ * @param {number} cliffR  right-face cliff extension in pixels (pre-multiplied by HEIGHT_SCALE)
+ * @param {number} cliffL  left-face cliff extension in pixels
+ */
+export function drawIsoTile(ctx, sx, sy, TW, TH, topColor, type, config, cliffR = 0, cliffL = 0) {
   const hw = TW * 0.5;
   const hh = TH * 0.5;
 
@@ -178,29 +182,31 @@ export function drawIsoTile(ctx, sx, sy, TW, TH, topColor, type, config) {
     ctx.lineWidth = 0.5;
     ctx.stroke();
   } else {
-    const flatH = Math.max(1, Math.round(TH * 0.22 * (config.tileHeight[type] / 0.2)));
+    const baseH = Math.max(1, Math.round(TH * 0.22 * (config.tileHeight[type] / 0.2)));
+    const lfH   = baseH + cliffL; // left-face total height with optional cliff
+    const rfH   = baseH + cliffR; // right-face total height with optional cliff
 
-    // Left face
+    // Left face (cliff-extended)
     ctx.beginPath();
     ctx.moveTo(sx,      sy);
     ctx.lineTo(sx - hw, sy + hh);
-    ctx.lineTo(sx - hw, sy + hh + flatH);
-    ctx.lineTo(sx,      sy + flatH);
+    ctx.lineTo(sx - hw, sy + hh + lfH);
+    ctx.lineTo(sx,      sy + lfH);
     ctx.closePath();
     ctx.fillStyle = darken(topColor, 30);
     ctx.fill();
 
-    // Right face
+    // Right face (cliff-extended)
     ctx.beginPath();
     ctx.moveTo(sx,      sy);
     ctx.lineTo(sx + hw, sy + hh);
-    ctx.lineTo(sx + hw, sy + hh + flatH);
-    ctx.lineTo(sx,      sy + flatH);
+    ctx.lineTo(sx + hw, sy + hh + rfH);
+    ctx.lineTo(sx,      sy + rfH);
     ctx.closePath();
     ctx.fillStyle = darken(topColor, 15);
     ctx.fill();
 
-    // Top face
+    // Top face (unchanged)
     ctx.beginPath();
     ctx.moveTo(sx,      sy);
     ctx.lineTo(sx - hw, sy + hh);

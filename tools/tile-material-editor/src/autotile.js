@@ -132,6 +132,13 @@ function _darkenRgb([r, g, b], amount) {
   return `rgb(${Math.max(0, r - amount)},${Math.max(0, g - amount)},${Math.max(0, b - amount)})`;
 }
 
+function _adjustRgb([r, g, b], amount) {
+  const c = v => Math.max(0, Math.min(255, Math.round(v + amount)));
+  return [c(r), c(g), c(b)];
+}
+
+const BRIGHTNESS_PER_LEVEL = 9; // keep in sync with heightMap.js
+
 // ── Neighbor transition data ───────────────────────────────────────────────────
 // Direction index → relative (dr, dc).
 //
@@ -265,8 +272,8 @@ function _drawSpeckle(ctx, sx, sy, TW, TH, typeId, row, col) {
  * Draw a single terrain tile at screen position (sx, sy).
  *
  * @param {CanvasRenderingContext2D} ctx
- * @param {number}   sx        screen-space x of tile top vertex
- * @param {number}   sy        screen-space y of tile top vertex
+ * @param {number}   sx        world-space x of tile top vertex (height offset already applied by caller)
+ * @param {number}   sy        world-space y of tile top vertex (height offset already applied by caller)
  * @param {number}   TW        tile width constant
  * @param {number}   TH        tile height constant
  * @param {number}   typeId    TERRAIN_TYPES value
@@ -274,33 +281,41 @@ function _drawSpeckle(ctx, sx, sy, TW, TH, typeId, row, col) {
  * @param {number}   col
  * @param {number[][]} tiles   full zone tile grid (for neighbor lookups)
  * @param {boolean}  debugMode when true: flat color, no blending, no speckle
+ * @param {number}   h         elevation level (0 = ground) — drives brightness
+ * @param {number}   cliffR    right-face cliff extension in pixels (pre-multiplied)
+ * @param {number}   cliffL    left-face cliff extension in pixels (pre-multiplied)
  */
-export function drawTerrainTile(ctx, sx, sy, TW, TH, typeId, row, col, tiles, debugMode) {
-  const hw     = TW * 0.5;
-  const hh     = TH * 0.5;
-  const flatH  = Math.max(1, Math.round(TH * TERRAIN_FLAT_H_RATIO));
+export function drawTerrainTile(ctx, sx, sy, TW, TH, typeId, row, col, tiles, debugMode,
+                                h = 0, cliffR = 0, cliffL = 0) {
+  const hw    = TW * 0.5;
+  const hh    = TH * 0.5;
+  const baseH = Math.max(1, Math.round(TH * TERRAIN_FLAT_H_RATIO));
+  const lfH   = baseH + cliffL; // left-face total height (px)
+  const rfH   = baseH + cliffR; // right-face total height (px)
 
-  const rgb      = debugMode ? null : _baseRgb(typeId, row, col);
-  const topColor = debugMode ? TERRAIN_DEBUG_COLORS[typeId] : _rgb(rgb);
-  const leftFace = debugMode ? topColor : _darkenRgb(rgb, 30);
-  const rightFace= debugMode ? topColor : _darkenRgb(rgb, 15);
+  // Apply height brightness: higher = brighter
+  const rawRgb   = debugMode ? null : _baseRgb(typeId, row, col);
+  const litRgb   = (rawRgb && h) ? _adjustRgb(rawRgb, h * BRIGHTNESS_PER_LEVEL) : rawRgb;
+  const topColor = debugMode ? TERRAIN_DEBUG_COLORS[typeId] : _rgb(litRgb ?? rawRgb);
+  const leftFace = debugMode ? topColor : _darkenRgb(litRgb ?? rawRgb, 30);
+  const rightFace= debugMode ? topColor : _darkenRgb(litRgb ?? rawRgb, 15);
 
-  // ── Left face ───────────────────────────────────────────────────────────────
+  // ── Left face (cliff-extended) ──────────────────────────────────────────────
   ctx.beginPath();
   ctx.moveTo(sx,      sy);
   ctx.lineTo(sx - hw, sy + hh);
-  ctx.lineTo(sx - hw, sy + hh + flatH);
-  ctx.lineTo(sx,      sy + flatH);
+  ctx.lineTo(sx - hw, sy + hh + lfH);
+  ctx.lineTo(sx,      sy + lfH);
   ctx.closePath();
   ctx.fillStyle = leftFace;
   ctx.fill();
 
-  // ── Right face ──────────────────────────────────────────────────────────────
+  // ── Right face (cliff-extended) ─────────────────────────────────────────────
   ctx.beginPath();
   ctx.moveTo(sx,      sy);
   ctx.lineTo(sx + hw, sy + hh);
-  ctx.lineTo(sx + hw, sy + hh + flatH);
-  ctx.lineTo(sx,      sy + flatH);
+  ctx.lineTo(sx + hw, sy + hh + rfH);
+  ctx.lineTo(sx,      sy + rfH);
   ctx.closePath();
   ctx.fillStyle = rightFace;
   ctx.fill();

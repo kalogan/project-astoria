@@ -5,6 +5,10 @@ import {
   TERRAIN_TYPES, TERRAIN_LABELS, TERRAIN_PREVIEW,
   isTerrainTile, drawTerrainTile,
 } from './autotile';
+import {
+  HEIGHT_SCALE, MAX_HEIGHT, MIN_HEIGHT,
+  getH, ensureHeights, applyHeightBrightness, shadowOpacity,
+} from './heightMap';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TW             = 64;
@@ -112,22 +116,74 @@ function applyBrush(tiles, row, col, tileType, brushSize) {
   return changed ? next : null;
 }
 
+// ── Shadow quadrant overlay ───────────────────────────────────────────────────
+// Draws a darkening gradient over one quadrant of a tile's top diamond face,
+// simulating shadow cast by a higher neighbor along that edge.
+// dir: 0 = top-right edge (uphill at r-1,c), 3 = top-left edge (uphill at r,c-1)
+
+function drawShadowQuadrant(ctx, sx, sy, TW, TH, dir, opacity) {
+  const hw = TW * 0.5;
+  const hh = TH * 0.5;
+
+  const top    = [sx,      sy];
+  const right  = [sx + hw, sy + hh];
+  const bottom = [sx,      sy + TH];
+  const left   = [sx - hw, sy + hh];
+  const center = [sx,      sy + hh];
+
+  const TRIS = [
+    [top,    right,  center],
+    [right,  bottom, center],
+    [bottom, left,   center],
+    [left,   top,    center],
+  ];
+
+  const [v0, v1, v2] = TRIS[dir];
+  const edgeMidX = (v0[0] + v1[0]) * 0.5;
+  const edgeMidY = (v0[1] + v1[1]) * 0.5;
+
+  const grad = ctx.createLinearGradient(edgeMidX, edgeMidY, center[0], center[1]);
+  grad.addColorStop(0,    `rgba(0,0,0,${opacity.toFixed(3)})`);
+  grad.addColorStop(0.65, `rgba(0,0,0,${(opacity * 0.18).toFixed(3)})`);
+  grad.addColorStop(1,    'rgba(0,0,0,0)');
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(v0[0], v0[1]);
+  ctx.lineTo(v1[0], v1[1]);
+  ctx.lineTo(v2[0], v2[1]);
+  ctx.closePath();
+  ctx.clip();
+
+  ctx.beginPath();
+  ctx.moveTo(sx,      sy);
+  ctx.lineTo(sx + hw, sy + hh);
+  ctx.lineTo(sx,      sy + TH);
+  ctx.lineTo(sx - hw, sy + hh);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.restore();
+}
+
 // ── Canvas draw ───────────────────────────────────────────────────────────────
 //
-//  overlayOpts: { refImage, refOpacity, refVisible, showGrid }
+//  overlayOpts: { refImage, refOpacity, refVisible, showGrid, debugMode,
+//                 heights, showHeightDebug }
 //
 //  Draw order (back → front):
 //    1. Background fill
-//    2. Tile meshes        (world space)
-//    3. Reference overlay  (world space, above tiles)
-//    4. Grid lines         (world space)
-//    5. Hover diamond      (screen space — constant pixel size)
-//    6. Entity markers     (screen space — constant pixel size)
+//    2. Tile meshes + shadows + height debug numbers  (world space)
+//    3. Reference overlay                             (world space, above tiles)
+//    4. Grid lines                                    (world space)
+//    5. Hover diamond                                 (screen space)
+//    6. Entity markers                                (screen space)
 
 function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntityId, editorMode, overlayOpts) {
   const {
     refImage = null, refOpacity = 0.4, refVisible = false,
     showGrid = false, debugMode = false,
+    heights = null, showHeightDebug = false,
   } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
@@ -151,26 +207,65 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   const rows                 = tiles.length;
   const cols                 = tiles[0].length;
 
-  // Sorted cell list for painter's algorithm
+  // Height-aware painter's algorithm sort:
+  // tiles at the same (r+c) diagonal are ordered by elevation (lower first)
+  // so taller tiles always paint over shorter tiles on the same diagonal.
   const cells = [];
   for (let r = 0; r < rows; r++)
     for (let c = 0; c < cols; c++)
       if (tiles[r][c] !== 0) cells.push([r, c]);
-  cells.sort((a, b) => (a[0] + a[1]) - (b[0] + b[1]));
+  cells.sort((a, b) => {
+    const ha = getH(heights, a[0], a[1]);
+    const hb = getH(heights, b[0], b[1]);
+    return (a[0] + a[1]) * (MAX_HEIGHT + 1) + ha
+         - (b[0] + b[1]) * (MAX_HEIGHT + 1) - hb;
+  });
 
   ctx.save();
   ctx.setTransform(zoom, 0, 0, zoom, panX, panY);
 
   // ── 1. Tiles ─────────────────────────────────────────────────────────────────
   for (const [r, c] of cells) {
-    const type = tiles[r][c];
-    const { x: sx, y: sy } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
+    const type   = tiles[r][c];
+    const h      = getH(heights, r, c);
+    const { x: sx, y: syBase } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
+    const sy     = syBase - h * HEIGHT_SCALE;
+    // Cliff extension: how many px the side faces drop below ground on each side
+    const cliffR = Math.max(0, h - getH(heights, r,     c + 1)) * HEIGHT_SCALE;
+    const cliffL = Math.max(0, h - getH(heights, r + 1, c    )) * HEIGHT_SCALE;
+
     if (isTerrainTile(type)) {
-      // Terrain tiles: procedural autotile rendering with edge blending
-      drawTerrainTile(ctx, sx, sy, TW, TH, type, r, c, tiles, debugMode);
+      drawTerrainTile(ctx, sx, sy, TW, TH, type, r, c, tiles, debugMode, h, cliffR, cliffL);
     } else {
-      // Legacy game tiles: existing flat-color renderer
-      drawIsoTile(ctx, sx, sy, TW, TH, pickTileColor(type, r, c, tiles, config), type, config);
+      const tColor = applyHeightBrightness(pickTileColor(type, r, c, tiles, config), h);
+      drawIsoTile(ctx, sx, sy, TW, TH, tColor, type, config, cliffR, cliffL);
+    }
+
+    // Shadow from higher uphill neighbors
+    // dir 0: uphill at (r-1, c) — casts shadow on the top-right quadrant
+    if (r > 0) {
+      const diff = getH(heights, r - 1, c) - h;
+      if (diff > 0) drawShadowQuadrant(ctx, sx, sy, TW, TH, 0, shadowOpacity(diff));
+    }
+    // dir 3: uphill at (r, c-1) — casts shadow on the top-left quadrant
+    if (c > 0) {
+      const diff = getH(heights, r, c - 1) - h;
+      if (diff > 0) drawShadowQuadrant(ctx, sx, sy, TW, TH, 3, shadowOpacity(diff));
+    }
+
+    // Height debug: show elevation number on tiles with h > 0
+    if (showHeightDebug && h > 0) {
+      const numSize = Math.max(7, Math.round(TH * 0.38));
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font         = `bold ${numSize}px monospace`;
+      ctx.strokeStyle  = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth    = 2.5;
+      ctx.strokeText(String(h), sx, sy + TH * 0.5);
+      ctx.fillStyle    = 'rgba(255,255,255,0.82)';
+      ctx.fillText(String(h), sx, sy + TH * 0.5);
+      ctx.restore();
     }
   }
 
@@ -194,9 +289,11 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   // ── 3. Grid overlay ───────────────────────────────────────────────────────────
   if (showGrid) {
     ctx.strokeStyle = 'rgba(255,255,255,0.13)';
-    ctx.lineWidth   = 1 / zoom; // constant 1 px on screen regardless of zoom
+    ctx.lineWidth   = 1 / zoom;
     for (const [r, c] of cells) {
-      const { x, y } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
+      const h = getH(heights, r, c);
+      const { x, y: yBase } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
+      const y = yBase - h * HEIGHT_SCALE;
       ctx.beginPath();
       ctx.moveTo(x,          y);
       ctx.lineTo(x + TW / 2, y + TH / 2);
@@ -212,7 +309,9 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   // ── 4. Hover diamond (screen space) ───────────────────────────────────────────
   if (hoveredTile) {
     const { row, col } = hoveredTile;
-    const { x: wx, y: wy } = gridToScreen(row, col, ISO_ORIGIN, TW, TH);
+    const h = getH(heights, row, col);
+    const { x: wx, y: wyBase } = gridToScreen(row, col, ISO_ORIGIN, TW, TH);
+    const wy  = wyBase - h * HEIGHT_SCALE;
     const sx  = wx  * zoom + panX;
     const sy  = wy  * zoom + panY;
     const sHW = TW  * zoom * 0.5;
@@ -230,6 +329,15 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     ctx.strokeStyle = P.accent;
     ctx.lineWidth   = 1.5;
     ctx.stroke();
+
+    // Height indicator label in height mode
+    if (editorMode === 'height' && h > 0) {
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.font         = '9px monospace';
+      ctx.fillStyle    = P.accent;
+      ctx.fillText(`h:${h}`, sx, sy - 3);
+    }
     ctx.restore();
   }
 
@@ -244,11 +352,13 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   ctx.font         = 'bold 9px monospace';
 
   for (const entity of entities) {
-    const grid      = worldToGrid(entity.position.x, entity.position.y, rows, cols);
-    const { x: wx, y: wy } = gridToScreen(grid.row, grid.col, ISO_ORIGIN, TW, TH);
-    const sx        = wx * zoom + panX;
-    const sy        = (wy + TH / 2) * zoom + panY;
-    const def       = getEntityDef(entity);
+    const grid = worldToGrid(entity.position.x, entity.position.y, rows, cols);
+    const h    = getH(heights, grid.row, grid.col);
+    const { x: wx, y: wyBase } = gridToScreen(grid.row, grid.col, ISO_ORIGIN, TW, TH);
+    const wy  = wyBase - h * HEIGHT_SCALE;
+    const sx  = wx  * zoom + panX;
+    const sy  = (wy + TH / 2) * zoom + panY;
+    const def = getEntityDef(entity);
     const isSelected = entity.id === selectedEntityId;
 
     if (isSelected) {
@@ -349,11 +459,13 @@ export default function MapEditorTab({ config }) {
   const [selectedEntityId,  setSelectedEntityId]  = useState(null);
 
   // ── Overlay / view ───────────────────────────────────────────────────────────
-  const [showGrid,   setShowGrid]   = useState(false);
-  const [debugMode,  setDebugMode]  = useState(false); // raw flat-color view
-  const [refImage,   setRefImage]   = useState(null);  // HTMLImageElement | null
-  const [refOpacity, setRefOpacity] = useState(0.4);
-  const [refVisible, setRefVisible] = useState(true);
+  const [showGrid,        setShowGrid]        = useState(false);
+  const [debugMode,       setDebugMode]       = useState(false); // raw flat-color view
+  const [refImage,        setRefImage]        = useState(null);  // HTMLImageElement | null
+  const [refOpacity,      setRefOpacity]      = useState(0.4);
+  const [refVisible,      setRefVisible]      = useState(true);
+  const [showHeightDebug, setShowHeightDebug] = useState(false); // show h numbers
+  const [rotationAngle,   setRotationAngle]   = useState(0);     // 0|1|2|3 (×90°)
 
   // ── History ──────────────────────────────────────────────────────────────────
   const [historyLen, setHistoryLen] = useState(0);
@@ -378,6 +490,8 @@ export default function MapEditorTab({ config }) {
   const selectedEntityDefRef = useRef(selectedEntityDef);
   const brushToolRef         = useRef(brushTool);
   const brushSizeRef         = useRef(brushSize);
+  const heightDeltaRef       = useRef(1);    // +1 raise / -1 lower, set on mousedown
+  const rotationAngleRef     = useRef(rotationAngle);
 
   useEffect(() => { cameraRef.current            = camera; },           [camera]);
   useEffect(() => { zoneRef.current              = zone; },             [zone]);
@@ -387,6 +501,7 @@ export default function MapEditorTab({ config }) {
   useEffect(() => { selectedEntityDefRef.current = selectedEntityDef; },[selectedEntityDef]);
   useEffect(() => { brushToolRef.current         = brushTool; },        [brushTool]);
   useEffect(() => { brushSizeRef.current         = brushSize; },        [brushSize]);
+  useEffect(() => { rotationAngleRef.current     = rotationAngle; },    [rotationAngle]);
 
   // ── Canvas resize ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -411,10 +526,13 @@ export default function MapEditorTab({ config }) {
     drawMapCanvas(
       canvas, zone, hoveredTile, camera, config,
       selectedEntityId, editorMode,
-      { refImage, refOpacity, refVisible, showGrid, debugMode },
+      {
+        refImage, refOpacity, refVisible, showGrid, debugMode,
+        heights: zone?.heights ?? null, showHeightDebug,
+      },
     );
   }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
-      refImage, refOpacity, refVisible, showGrid, debugMode]);
+      refImage, refOpacity, refVisible, showGrid, debugMode, showHeightDebug]);
 
   // ── Center camera on new map ──────────────────────────────────────────────────
   useEffect(() => {
@@ -619,6 +737,21 @@ export default function MapEditorTab({ config }) {
     setIsDirty(true);
   }, []);
 
+  // ── Height adjustment ─────────────────────────────────────────────────────────
+  // Raises or lowers a single tile's elevation by `delta` (+1 or −1), clamped
+  // to [MIN_HEIGHT, MAX_HEIGHT].  Stored in zone.heights separate from zone.tiles.
+  const adjustHeight = useCallback((row, col, delta) => {
+    setZone(prev => {
+      if (!prev) return prev;
+      const newHeights = ensureHeights(prev).map(r => [...r]);
+      const newVal = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, newHeights[row][col] + delta));
+      if (newVal === newHeights[row][col]) return prev;
+      newHeights[row][col] = newVal;
+      return { ...prev, heights: newHeights };
+    });
+    setIsDirty(true);
+  }, []);
+
   // ── Entity CRUD ───────────────────────────────────────────────────────────────
   const placeEntity = useCallback((row, col) => {
     const z = zoneRef.current;
@@ -710,6 +843,13 @@ export default function MapEditorTab({ config }) {
     }
 
     if (e.button === 0) {
+      // Rotation view: editing disabled — only allow panning
+      if (rotationAngleRef.current !== 0) {
+        isPanningRef.current = true;
+        lastMouseRef.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
+
       if (editorModeRef.current === 'entity') {
         // Select existing marker
         const hit = entityHitTest(mx, my, zoneRef.current, cameraRef.current);
@@ -719,6 +859,19 @@ export default function MapEditorTab({ config }) {
         if (tile) {
           commitHistory();
           placeEntity(tile.row, tile.col);
+        } else {
+          isPanningRef.current = true;
+          lastMouseRef.current = { x: e.clientX, y: e.clientY };
+        }
+
+      } else if (editorModeRef.current === 'height') {
+        const tile = hitTest(mx, my);
+        if (tile) {
+          const delta = e.shiftKey ? -1 : 1;
+          heightDeltaRef.current = delta;
+          commitHistory();
+          adjustHeight(tile.row, tile.col, delta);
+          setIsPainting(true);
         } else {
           isPanningRef.current = true;
           lastMouseRef.current = { x: e.clientX, y: e.clientY };
@@ -751,7 +904,7 @@ export default function MapEditorTab({ config }) {
         }
       }
     }
-  }, [hitTest, applyTileTool, placeEntity, commitHistory]);
+  }, [hitTest, applyTileTool, placeEntity, commitHistory, adjustHeight]);
 
   const handleMouseMove = useCallback((e) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -774,7 +927,11 @@ export default function MapEditorTab({ config }) {
     if (editorModeRef.current === 'tile' && isPaintingRef.current && tile) {
       applyTileTool(tile.row, tile.col);
     }
-  }, [hitTest, applyTileTool]);
+    // Drag-adjust height
+    if (editorModeRef.current === 'height' && isPaintingRef.current && tile) {
+      adjustHeight(tile.row, tile.col, heightDeltaRef.current);
+    }
+  }, [hitTest, applyTileTool, adjustHeight]);
 
   const handleMouseUp = useCallback(() => {
     isPanningRef.current = false;
@@ -832,14 +989,14 @@ export default function MapEditorTab({ config }) {
 
         {/* Mode toggle */}
         <div style={{ display: 'flex', borderBottom: `1px solid ${P.border}`, flexShrink: 0 }}>
-          {[['tile', 'TILE MODE'], ['entity', 'ENTITY MODE']].map(([mode, label]) => {
+          {[['tile', 'TILE'], ['height', 'HEIGHT'], ['entity', 'ENTITY']].map(([mode, label]) => {
             const active = editorMode === mode;
             return (
               <button key={mode} onClick={() => switchMode(mode)} style={{
                 flex: 1, background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
                 border: 'none', borderBottom: `2px solid ${active ? P.accent : 'transparent'}`,
                 color: active ? P.accent : P.muted,
-                fontFamily: 'monospace', fontSize: 9, letterSpacing: 2,
+                fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
                 padding: '10px 0', cursor: 'pointer',
               }}>
                 {label}
@@ -1035,6 +1192,46 @@ export default function MapEditorTab({ config }) {
                 </div>
                 <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.6 }}>
                   CLICK or DRAG to paint<br />SCROLL to zoom · MIDDLE-DRAG to pan
+                </div>
+              </Section>
+            </>
+          )}
+
+          {/* ── HEIGHT MODE ──────────────────────────────────────────────────── */}
+          {editorMode === 'height' && (
+            <>
+              <Section title="HEIGHT PAINT">
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.85 }}>
+                  CLICK to raise tile (+1)<br />
+                  SHIFT+CLICK to lower (−1)<br />
+                  DRAG to paint elevation<br />
+                  CTRL+Z undo · CTRL+Y redo
+                </div>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 8px',
+                  background: 'rgba(0,212,255,0.05)',
+                  border: `1px solid ${P.border}`,
+                }}>
+                  <span style={{ fontSize: 9, color: P.muted, letterSpacing: 1 }}>RANGE</span>
+                  <span style={{ fontFamily: 'monospace', fontSize: 11, color: P.text }}>
+                    {MIN_HEIGHT} – {MAX_HEIGHT}
+                  </span>
+                </div>
+                <div style={{
+                  display: 'flex', gap: 3, alignItems: 'stretch', height: 28,
+                }}>
+                  {Array.from({ length: MAX_HEIGHT + 1 }, (_, i) => (
+                    <div key={i} style={{
+                      flex: 1,
+                      background: `rgba(0,212,255,${0.06 + i * 0.12})`,
+                      border: `1px solid ${P.border}`,
+                      display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+                      paddingBottom: 2,
+                    }}>
+                      <span style={{ fontSize: 7, color: P.muted, fontFamily: 'monospace' }}>{i}</span>
+                    </div>
+                  ))}
                 </div>
               </Section>
             </>
@@ -1266,6 +1463,28 @@ export default function MapEditorTab({ config }) {
               {debugMode ? 'RAW' : 'BLEND'}
             </button>
             <button
+              onClick={() => setShowHeightDebug(d => !d)}
+              title="Show height numbers on elevated tiles"
+              style={{
+                ...toolbarBtnStyle,
+                color:  showHeightDebug ? P.accent : P.muted,
+                border: `1px solid ${showHeightDebug ? P.accent : P.border}`,
+              }}
+            >
+              H-NUM
+            </button>
+            <button
+              onClick={() => setRotationAngle(a => (a + 1) % 4)}
+              title={rotationAngle ? `Rotated ${rotationAngle * 90}° — editing disabled` : 'Rotate view (debug only)'}
+              style={{
+                ...toolbarBtnStyle,
+                color:  rotationAngle ? P.warn : P.muted,
+                border: `1px solid ${rotationAngle ? P.warn : P.border}`,
+              }}
+            >
+              {rotationAngle ? `${rotationAngle * 90}°` : 'ROTATE'}
+            </button>
+            <button
               onClick={handleScreenshot}
               disabled={!zone}
               title="Export canvas as PNG"
@@ -1277,7 +1496,9 @@ export default function MapEditorTab({ config }) {
             <span style={{ fontSize: 10, color: P.muted, letterSpacing: 2, marginLeft: 4 }}>
               {editorMode === 'entity'
                 ? `${zone?.entities?.length ?? 0} entities`
-                : hoveredTile ? `${hoveredTile.col}, ${hoveredTile.row}` : ''}
+                : hoveredTile
+                  ? `${hoveredTile.col},${hoveredTile.row}${editorMode === 'height' ? ` h:${getH(zone?.heights, hoveredTile.row, hoveredTile.col)}` : ''}`
+                  : ''}
               {'  ·  '}{Math.round(camera.zoom * 100)}%
             </span>
           </div>
@@ -1287,9 +1508,14 @@ export default function MapEditorTab({ config }) {
           ref={canvasRef}
           style={{
             display: 'block',
-            cursor: editorMode === 'entity'
-              ? 'crosshair'
-              : isPainting ? 'crosshair' : 'default',
+            cursor: rotationAngle !== 0
+              ? 'default'
+              : (editorMode === 'entity' || editorMode === 'height' || isPainting)
+                ? 'crosshair'
+                : 'default',
+            transform: rotationAngle ? `rotate(${rotationAngle * 90}deg)` : undefined,
+            transformOrigin: '50% 50%',
+            transition: 'transform 0.25s ease',
           }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
