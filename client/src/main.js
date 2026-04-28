@@ -9,7 +9,7 @@ import { ZoneManager }              from './zoneManager.js';
 import { SystemManager, THROTTLE }  from './systemManager.js';
 import { GameClock }                from './gameClock.js';
 import { EventBus }                 from './eventBus.js';
-import { saveGame, loadGame }       from './saveSystem.js';
+import { saveGame, loadGame, newSaveId, setActiveSaveId } from './saveSystem.js';
 import { showMenu }                 from './menu.js';
 import { ProgressionManager }       from './progressionManager.js';
 import { WorldStateManager }        from './worldStateManager.js';
@@ -166,7 +166,9 @@ const combat = new CombatSystem(scene, player, { hud, eventBus });
 combat.build = build;
 
 const zone    = new ZoneManager(scene, camera, renderer, combat, hud, player);
-const saveCtx = { player, zone, combat, questSys, inventory, progression, worldState, build, skillTree };
+// saveId is set immediately after menu choice (new or load) so every
+// subsequent saveGame() call writes to the correct slot.
+const saveCtx = { saveId: null, player, zone, combat, questSys, inventory, progression, worldState, build, skillTree };
 
 zone.progressionManager = progression;
 dungeonMgr._zoneManager = zone;
@@ -584,7 +586,20 @@ window.addEventListener('keydown', e => {
   clanMgr.load?.();
 
   const choice = await showMenu();
-  const save   = choice === 'continue' ? loadGame() : null;
+  // choice is 'new'  OR  { action:'load', saveId:string }
+  const isLoad  = typeof choice === 'object' && choice.action === 'load';
+  const save    = isLoad ? loadGame(choice.saveId) : null;
+
+  if (isLoad && save) {
+    // Restore active save slot so all future saveGame() calls go to same slot
+    saveCtx.saveId = choice.saveId;
+    setActiveSaveId(choice.saveId);
+  } else {
+    // Brand-new game — allocate a fresh slot immediately
+    const id = newSaveId();
+    saveCtx.saveId = id;
+    setActiveSaveId(id);
+  }
 
   build.setMetaMultipliers(metaProg.getMultipliers());
 
