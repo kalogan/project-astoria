@@ -57,6 +57,14 @@ export function hasSaves() {
   return loadIndex().length > 0;
 }
 
+/** Legacy compat — clears the active save slot. */
+export function clearSave() {
+  if (!_activeSaveId) return;
+  localStorage.removeItem(SAVE_PREFIX + _activeSaveId);
+  _removeFromIndex(_activeSaveId);
+  _activeSaveId = null;
+}
+
 // ── Public: load ──────────────────────────────────────────────────────────────
 
 /**
