@@ -45,6 +45,7 @@ import { StatAllocPanel }        from './statAllocPanel.js';
 import { AstoniaSkillPanel }     from './astoniaSkillPanel.js';
 import { AnimationSystem }         from './animationSystem.js';
 import { CharAnimator }            from './charAnimator.js';
+import { OverheadBarSystem }       from './overheadBarSystem.js';
 import { HitEffectSystem }         from './hitEffectSystem.js';
 import { AbilityEffectSystem }     from './abilityEffectSystem.js';
 import { StatusEffectSystem }      from './statusEffectSystem.js';
@@ -141,6 +142,7 @@ const styleEnforcer  = new StyleEnforcer();
 const audioSys       = new AudioSystem();
 const animSys        = new AnimationSystem();
 const charAnim       = new CharAnimator();
+const overheadBars   = new OverheadBarSystem();
 const hitFX            = new HitEffectSystem(scene);
 const abilityFX        = new AbilityEffectSystem(scene);
 const statusFX         = new StatusEffectSystem();
@@ -196,6 +198,7 @@ audioSys.setContext({ player });
 hud.setEventBus(eventBus);   // wire chat log + item event emission
 animSys.setContext({ player });
 charAnim.setContext({ player });
+overheadBars.setContext({ player, build });
 hitFX.setContext({ player });
 abilityFX.setContext({ player });
 statusFX.setContext({ player });
@@ -497,6 +500,7 @@ zone.onLoad = (questDefs) => {
     abilitySys,
     animSys,
     charAnim,
+    overheadBars,
     hitFX,
     abilityFX,
     statusFX,
