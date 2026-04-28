@@ -1,6 +1,9 @@
 import React, { useRef, useEffect, useLayoutEffect, useCallback, useState } from 'react';
 import { P, TILE_TYPES, TILE_LABELS, deepClone, pickTileColor, drawIsoTile, btnStyle } from './constants';
-import { gridToScreen, screenToGrid, gridToWorld, worldToGrid } from './isoUtils';
+import { gridToScreen, gridToWorld, worldToGrid } from './isoUtils';
+import { pickTile, canvasPoint, TILE_W, TILE_H, ISO_ORIG } from './systems/pickingSystem';
+import { worldFromZone } from './systems/worldState';
+import { getTool } from './tools/toolSystem';
 import {
   TERRAIN_TYPES, TERRAIN_LABELS, TERRAIN_PREVIEW,
   isTerrainTile, drawTerrainTile,
@@ -41,9 +44,12 @@ import {
 import { LIGHT_PRESETS } from './systems/lightingSystem';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
-const TW             = 64;
-const TH             = 32;
-const ISO_ORIGIN     = { x: 0, y: 0 };
+// TW / TH / ISO_ORIGIN are re-exported from pickingSystem so the renderer and
+// the picker always share the exact same values.
+const TW         = TILE_W;
+const TH         = TILE_H;
+const ISO_ORIGIN = ISO_ORIG;
+
 const FALLBACK_ZONES = ['Cameron_Start', 'Cameron_Forest', 'zone_01', 'zone_02'];
 const ZOOM_MIN       = 0.25;
 const ZOOM_MAX       = 4;
@@ -1913,37 +1919,31 @@ export default function MapEditorTab({ config }) {
     setIsDirty(true);
   }, [activeSurface]);
 
-  // ── Grid hit-test ─────────────────────────────────────────────────────────────
-  const hitTest = useCallback((mouseX, mouseY) => {
+  // ── Grid hit-test — delegates to pickingSystem for pixel-accurate tile resolve ─
+  const hitTest = useCallback((canvasX, canvasY) => {
     const z = zoneRef.current;
     if (!z) return null;
-    const cam    = cameraRef.current;
-    const worldX = (mouseX - cam.panX) / cam.zoom;
-    const worldY = (mouseY - cam.panY) / cam.zoom;
-    return screenToGrid(worldX, worldY, ISO_ORIGIN, TW, TH, z.tiles.length, z.tiles[0].length);
+    return pickTile(canvasX, canvasY, cameraRef.current,
+                    z.tiles.length, z.tiles[0]?.length ?? 0);
   }, []);
 
   // ── Mouse events ──────────────────────────────────────────────────────────────
+  // Shared "start panning" helper used by tools when the click misses the map
+  const _startPan = useCallback((e) => {
+    isPanningRef.current = true;
+    lastMouseRef.current = { x: e.clientX, y: e.clientY };
+  }, []);
+
   const handleMouseDown = useCallback((e) => {
     e.preventDefault();
-    const rect = canvasRef.current.getBoundingClientRect();
-    const mx   = e.clientX - rect.left;
-    const my   = e.clientY - rect.top;
+    const { x: mx, y: my } = canvasPoint(e, canvasRef.current);
 
     // Middle-click always pans
-    if (e.button === 1) {
-      isPanningRef.current = true;
-      lastMouseRef.current = { x: e.clientX, y: e.clientY };
-      return;
-    }
+    if (e.button === 1) { _startPan(e); return; }
 
     if (e.button === 0) {
       // Rotation view: editing disabled — only allow panning
-      if (rotationAngleRef.current !== 0) {
-        isPanningRef.current = true;
-        lastMouseRef.current = { x: e.clientX, y: e.clientY };
-        return;
-      }
+      if (rotationAngleRef.current !== 0) { _startPan(e); return; }
 
       if (editorModeRef.current === 'entity') {
         // Select existing marker
@@ -2074,13 +2074,12 @@ export default function MapEditorTab({ config }) {
       }
     }
   }, [hitTest, applyTileTool, placeEntity, commitHistory, adjustHeight,
-      placeProp, deleteProp, paintSurface, placeLight, scatterProps]);
+      placeProp, deleteProp, paintSurface, placeLight, scatterProps, _startPan]);
 
   const handleMouseMove = useCallback((e) => {
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const { x: mx, y: my } = canvasPoint(e, canvas);
 
     if (isPanningRef.current) {
       const dx = e.clientX - lastMouseRef.current.x;
@@ -2160,9 +2159,7 @@ export default function MapEditorTab({ config }) {
     if (!canvas) return;
     const onWheel = (e) => {
       e.preventDefault();
-      const rect   = canvas.getBoundingClientRect();
-      const mx     = e.clientX - rect.left;
-      const my     = e.clientY - rect.top;
+      const { x: mx, y: my } = canvasPoint(e, canvas);
       const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
       setCamera(prev => {
         const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prev.zoom * factor));
