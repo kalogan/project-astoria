@@ -9,7 +9,7 @@ import { ZoneManager }              from './zoneManager.js';
 import { SystemManager, THROTTLE }  from './systemManager.js';
 import { GameClock }                from './gameClock.js';
 import { EventBus }                 from './eventBus.js';
-import { saveGame, loadGame, newSaveId, setActiveSaveId } from './saveSystem.js';
+import { saveGame, loadGame, loadIndex, newSaveId, setActiveSaveId } from './saveSystem.js';
 import { showMenu }                 from './menu.js';
 import { ProgressionManager }       from './progressionManager.js';
 import { WorldStateManager }        from './worldStateManager.js';
@@ -40,7 +40,8 @@ import { generateFromPrompt, planBatch, EXAMPLE_PROMPT } from './aiBatchPlanner.
 
 import { AudioSystem }      from './audioSystem.js';
 import { ALL_SOUND_IDS }    from './audioSystem.js';
-import { showClassSelect }  from './classSelect.js';
+import { showClassSelect }     from './classSelect.js';
+import { showCharacterCreate } from './characterCreate.js';
 import { StatAllocPanel }        from './statAllocPanel.js';
 import { AstoniaSkillPanel }     from './astoniaSkillPanel.js';
 import { AnimationSystem }         from './animationSystem.js';
@@ -168,7 +169,9 @@ combat.build = build;
 const zone    = new ZoneManager(scene, camera, renderer, combat, hud, player);
 // saveId is set immediately after menu choice (new or load) so every
 // subsequent saveGame() call writes to the correct slot.
-const saveCtx = { saveId: null, player, zone, combat, questSys, inventory, progression, worldState, build, skillTree };
+// name is set once at character creation and preserved by saveSystem on all
+// subsequent saves (saveSystem._existingName falls back to it).
+const saveCtx = { saveId: null, name: null, player, zone, combat, questSys, inventory, progression, worldState, build, skillTree };
 
 zone.progressionManager = progression;
 dungeonMgr._zoneManager = zone;
@@ -605,10 +608,32 @@ window.addEventListener('keydown', e => {
 
   if (save?.build) {
     build.load(save.build);
+    // Restore character name from loaded save metadata
+    saveCtx.name = loadIndex().find(m => m.id === saveCtx.saveId)?.name ?? null;
   } else {
-    // New game — let player pick their class
-    const chosenClass = await showClassSelect();
-    build.setClass(chosenClass);
+    // New game — show character creation (class + name)
+    let creation = null;
+    while (!creation) {
+      creation = await showCharacterCreate();
+      if (creation === null) {
+        // Player pressed Back — return to main menu and restart the whole flow
+        const choice2 = await showMenu();
+        const isLoad2 = typeof choice2 === 'object' && choice2.action === 'load';
+        if (isLoad2 && loadGame(choice2.saveId)) {
+          // They picked a save this time — reload the page cleanly to avoid
+          // partial-init state.  Simple and bulletproof.
+          window.location.reload();
+          return;
+        }
+        // Still new game — loop back to character create
+        creation = null;
+        const id2 = newSaveId();
+        saveCtx.saveId = id2;
+        setActiveSaveId(id2);
+      }
+    }
+    saveCtx.name = creation.name;
+    build.setClass(creation.classId);
   }
 
   // Rebuild the player's visual mesh for the chosen/restored class.

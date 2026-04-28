@@ -96,7 +96,7 @@ export function loadZoneState(zoneId) {
  * Full save: player + zone snapshot + quests + progression + build + etc.
  * Automatically regenerates portrait and updates index metadata.
  */
-export function saveGame({ saveId, player, zone, combat, questSys, inventory,
+export function saveGame({ saveId, name, player, zone, combat, questSys, inventory,
                            progression, worldState, build, skillTree }) {
   const id = saveId ?? _activeSaveId;
   if (!id) { console.warn('[Save] No active save ID — call setActiveSaveId() first'); return; }
@@ -139,7 +139,7 @@ export function saveGame({ saveId, player, zone, combat, questSys, inventory,
   // Update index metadata (portrait regenerated on every save)
   _updateIndex({
     id,
-    name:       _className(build?.getClass?.()),
+    name:       name ?? _existingName(id) ?? _className(build?.getClass?.()),
     class:      build?.getClass?.() ?? 'warrior',
     level:      progression?.getLevel?.() ?? player.level ?? 1,
     clan:       null,   // TODO: wire clanManager when available
@@ -407,6 +407,11 @@ function _migrateLegacyOnce() {
 
 function _className(cls) {
   return cls ? cls.charAt(0).toUpperCase() + cls.slice(1) : 'Warrior';
+}
+
+/** Return the name already stored in the index for this save id (if any). */
+function _existingName(id) {
+  return loadIndex().find(m => m.id === id)?.name ?? null;
 }
 
 function _captureZone(zone, combat) {
