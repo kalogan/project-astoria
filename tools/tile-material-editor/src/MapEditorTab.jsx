@@ -25,6 +25,16 @@ import { PROP_DEFS, PROP_CATEGORIES, detectWallDirection, canPlaceProp } from '.
 import { drawProp, propSortKey } from './propRenderer';
 import { PREFABS, rotatePrefab, canPlacePrefab, applyPrefab } from './prefabs/prefabDefs';
 import { computeFOV, drawFOVOverlay } from './fovUtils';
+import {
+  buildFrameLights, tickLights, drawLightingPass,
+} from './systems/lightingSystem';
+import {
+  computeInteriorTiles, getCutawayAlpha, computeTransitionFactor,
+  getBlendedLightingConfig, drawInteriorZoneOverlay,
+} from './systems/interiorZones';
+import {
+  generateLoot, lootLine, CONTAINER_LOOT_TABLES,
+} from './systems/lootTables';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TW             = 64;
@@ -49,6 +59,9 @@ const ENTITY_PALETTE = [
   { type: 'transition', subtype: 'ladder_down', label: 'Ladder Down',     color: '#806830', icon: 'L', defaultConfig: { targetZone: '' } },
   { type: 'transition', subtype: 'cave_entrance', label: 'Cave Entrance', color: '#58504a', icon: 'C', defaultConfig: { targetZone: '' } },
   { type: 'marker',     subtype: 'generic',    label: 'Room Marker',     color: '#9b59b6', icon: 'M', defaultConfig: { label: '', color: '#9b59b6' } },
+  { type: 'container',  subtype: 'chest',      label: 'Container: Chest',  color: '#c8a810', icon: '▣', defaultConfig: { lootTableId: 'basic_chest',  opened: false, contents: [] } },
+  { type: 'container',  subtype: 'barrel',     label: 'Container: Barrel', color: '#7a4a2a', icon: '▣', defaultConfig: { lootTableId: 'barrel',       opened: false, contents: [] } },
+  { type: 'container',  subtype: 'crate',      label: 'Container: Crate',  color: '#8b5a2b', icon: '▣', defaultConfig: { lootTableId: 'crate',        opened: false, contents: [] } },
 ];
 
 // ── Surface overlay definitions ───────────────────────────────────────────────
@@ -232,12 +245,18 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     waterFlow = null, animOffset = 0,
     waterMod = null, zoneType = 'surface',
     props = null, surface = null, showProps = true,
-    ghostProp = null,           // { type, x, y, valid } — placement preview
-    ghostPrefab = null,         // { prefab, x, y, valid } — prefab preview
+    ghostProp = null,
+    ghostPrefab = null,
     selectedPropId = null,
     showPropBounds = false,
     fovSet = null, showFOV = false,
     showSurface = true,
+    // Lighting
+    lights = null, enableLighting = false, darkAlpha = 0.78,
+    showLightRadius = false,
+    // Interior cutaway
+    enableCutaway = false, cutawayTransition = 0, playerScreenY = 0,
+    showInteriorZones = false, interiorTiles = null,
   } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
@@ -289,6 +308,15 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     const cliffR = Math.max(0, h - getH(heights, r,     c + 1)) * HEIGHT_SCALE;
     const cliffL = Math.max(0, h - getH(heights, r + 1, c    )) * HEIGHT_SCALE;
 
+    // Cutaway: fade front-facing wall tiles when player is inside a building
+    let tileAlpha = 1.0;
+    if (enableCutaway && cutawayTransition > 0.05) {
+      const tsY = (syBase - 0) * zoom + (camera?.panY ?? 0); // tile top-vertex screen Y
+      tileAlpha = getCutawayAlpha(type, syBase, playerScreenY / (camera?.zoom ?? 1) - (camera?.panY ?? 0) / (camera?.zoom ?? 1), cutawayTransition);
+    }
+    const prevAlpha = tileAlpha < 0.999 ? ctx.globalAlpha : null;
+    if (prevAlpha !== null) ctx.globalAlpha = tileAlpha;
+
     if (isWaterTile(type)) {
       drawWaterTile(ctx, sx, sy, TW, TH, r, c, tiles, heights, waterFlow,
                     animOffset, cliffR, cliffL, waterMod);
@@ -324,6 +352,9 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
       const diff = getH(heights, r, c - 1) - h;
       if (diff > 0) drawShadowQuadrant(ctx, sx, sy, TW, TH, 3, shadowOpacity(diff));
     }
+
+    // Restore tile alpha
+    if (prevAlpha !== null) ctx.globalAlpha = prevAlpha;
 
     // Height debug overlay
     if (showHeightDebug && h > 0) {
@@ -572,7 +603,29 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     if (envCfg?.vignette) drawVignette(ctx, W, H, envCfg.vignette);
   }
 
-  // ── 6. FOV overlay (screen-space, drawn over vignette) ────────────────────────
+  // ── 6. Lighting pass (darkness + radial lights, screen-space) ────────────────
+  if (enableLighting && lights?.length >= 0) {
+    drawLightingPass(
+      ctx, W, H,
+      lights ?? [], tiles, camera,
+      gridToScreen, ISO_ORIGIN, TW, TH,
+      heights, HEIGHT_SCALE,
+      darkAlpha,
+      showFOV ? fovSet : null,   // only mask by FOV when FOV debug is on
+      null,                       // exploredSet — not tracked in editor yet
+      showLightRadius,
+    );
+  }
+
+  // ── 7. Interior zone debug overlay ────────────────────────────────────────────
+  if (showInteriorZones && interiorTiles?.size) {
+    drawInteriorZoneOverlay(
+      ctx, interiorTiles, tiles, camera,
+      gridToScreen, ISO_ORIGIN, TW, TH, heights, HEIGHT_SCALE,
+    );
+  }
+
+  // ── 8. FOV debug overlay (screen-space) ───────────────────────────────────────
   if (showFOV && fovSet) {
     drawFOVOverlay(ctx, fovSet, tiles, ISO_ORIGIN, TW, TH, camera, gridToScreen);
   }
@@ -779,6 +832,23 @@ export default function MapEditorTab({ config }) {
   const [fovOrigin, setFovOrigin] = useState(null); // {x,y} grid cell
   const [fovRadius, setFovRadius] = useState(10);
 
+  // ── Lighting ──────────────────────────────────────────────────────────────────
+  const [enableLighting,   setEnableLighting]   = useState(false);
+  const [showLightRadius,  setShowLightRadius]  = useState(false);
+  // darkAlpha auto-derived from interior transition when lighting is on
+
+  // ── Interior cutaway ──────────────────────────────────────────────────────────
+  const [enableCutaway,    setEnableCutaway]    = useState(false);
+  const [showInteriorZones,setShowInteriorZones]= useState(false);
+  // cutawayTransition smoothly lerps in RAF loop via ref
+  const cutawayTransitionRef = useRef(0);
+
+  // ── Loot popup ────────────────────────────────────────────────────────────────
+  const [lootPopup, setLootPopup] = useState(null); // { entityId, title, lines[] }
+
+  // ── Interior tiles cache ──────────────────────────────────────────────────────
+  const interiorTilesRef = useRef(new Set());
+
   // ── Tile mode ────────────────────────────────────────────────────────────────
   const [selectedTileType, setSelectedTileType] = useState(TILE_TYPES.FLOOR);
   const [hoveredTile,      setHovered]          = useState(null);
@@ -828,6 +898,8 @@ export default function MapEditorTab({ config }) {
   const heightDeltaRef       = useRef(1);    // +1 raise / -1 lower, set on mousedown
   const rotationAngleRef     = useRef(rotationAngle);
   const selectedFlowDirRef   = useRef(selectedFlowDir);
+  const enableLightingRef      = useRef(enableLighting);
+  const enableCutawayRef       = useRef(enableCutaway);
   const activePropTypeRef      = useRef(activePropType);
   const activeSurfaceRef       = useRef(activeSurface);
   const surfaceBrushSizeRef    = useRef(surfaceBrushSize);
@@ -848,6 +920,8 @@ export default function MapEditorTab({ config }) {
   useEffect(() => { brushSizeRef.current         = brushSize; },        [brushSize]);
   useEffect(() => { rotationAngleRef.current     = rotationAngle; },    [rotationAngle]);
   useEffect(() => { selectedFlowDirRef.current   = selectedFlowDir; },  [selectedFlowDir]);
+  useEffect(() => { enableLightingRef.current      = enableLighting; },    [enableLighting]);
+  useEffect(() => { enableCutawayRef.current       = enableCutaway; },     [enableCutaway]);
   useEffect(() => { activePropTypeRef.current      = activePropType; },     [activePropType]);
   useEffect(() => { activeSurfaceRef.current       = activeSurface; },      [activeSurface]);
   useEffect(() => { surfaceBrushSizeRef.current    = surfaceBrushSize; },   [surfaceBrushSize]);
@@ -868,43 +942,109 @@ export default function MapEditorTab({ config }) {
     const ghostPrefab = (editorMode === 'prefabs' && ghostPrefabTile && rotatedPrefab)
       ? { prefab: rotatedPrefab, ...ghostPrefabTile }
       : null;
+    const trans = cutawayTransitionRef.current;
+    const bLight = enableLighting ? getBlendedLightingConfig(trans) : null;
     drawOptsRef.current = {
       zone, hoveredTile, camera, config, selectedEntityId, editorMode,
       overlayOpts: {
         refImage, refOpacity, refVisible, showGrid, debugMode,
-        heights:        zone?.heights   ?? null,
+        heights:           zone?.heights   ?? null,
         showHeightDebug,
-        waterFlow:      zone?.waterFlow ?? null,
-        waterMod:       ZONE_ENV[zoneType]?.waterMod ?? null,
+        waterFlow:         zone?.waterFlow ?? null,
+        waterMod:          ZONE_ENV[zoneType]?.waterMod ?? null,
         zoneType,
-        props:          zone?.props  ?? null,
-        surface:        zone?.surface ?? null,
+        props:             zone?.props  ?? null,
+        surface:           zone?.surface ?? null,
         showProps, showSurface, showPropBounds,
         selectedPropId, ghostProp, ghostPrefab,
         fovSet, showFOV,
+        // Lighting
+        lights:            enableLighting ? frameLightsRef.current : [],
+        enableLighting,
+        darkAlpha:         bLight?.darkAlpha ?? 0.78,
+        showLightRadius,
+        // Cutaway
+        enableCutaway,
+        cutawayTransition: trans,
+        showInteriorZones,
+        interiorTiles:     interiorTilesRef.current,
+        fovOriginForCutaway: fovOrigin,
       },
     };
   }); // no deps — runs after every render
 
-  // ── Water animation RAF loop ─────────────────────────────────────────────────
-  // Continuously redraws the canvas (with advancing animOffset) only when the
-  // zone contains water tiles.  Non-water maps pay essentially zero cost.
+  // ── Water + lighting animation RAF loop ──────────────────────────────────────
+  // Redraws the canvas each frame when: water is present, lighting is on,
+  // or cutaway transition is in progress.
+  const frameLightsRef = useRef([]);
+
   useEffect(() => {
     let lastTime = performance.now();
+
     const tick = (now) => {
       const dt  = Math.min((now - lastTime) / 1000, 0.05);
       lastTime  = now;
 
-      const hasWater = zoneRef.current?.tiles?.some(row => row.some(t => t === WATER_TYPE));
-      if (hasWater) {
+      const z        = zoneRef.current;
+      const hasWater = z?.tiles?.some(row => row.some(t => t === WATER_TYPE));
+      const lighting = enableLightingRef.current;
+
+      // Advance cutaway transition (lerp toward target based on fovOrigin/player pos)
+      let cutawayChanged = false;
+      if (enableCutawayRef.current && z?.tiles) {
+        const fovO = drawOptsRef.current?.overlayOpts?.fovOriginForCutaway;
+        const target = fovO
+          ? computeTransitionFactor(fovO.x, fovO.y, interiorTilesRef.current)
+          : 0;
+        const cur = cutawayTransitionRef.current;
+        const next = cur + (target - cur) * Math.min(1, dt * 4.5);
+        if (Math.abs(next - cur) > 0.005) {
+          cutawayTransitionRef.current = next;
+          cutawayChanged = true;
+        }
+      } else if (cutawayTransitionRef.current > 0.01) {
+        cutawayTransitionRef.current *= (1 - dt * 4);
+        cutawayChanged = true;
+      }
+
+      // Tick light flicker
+      if (lighting && z) {
+        const ls = buildFrameLights(z);
+        tickLights(ls, now / 1000);
+        frameLightsRef.current = ls;
+      }
+
+      const needRedraw = hasWater || lighting || cutawayChanged;
+      if (needRedraw) {
         animOffsetRef.current += dt * 0.35;
         const canvas = canvasRef.current;
         const opts   = drawOptsRef.current;
         if (canvas && opts?.zone) {
+          const trans = cutawayTransitionRef.current;
+          const bLight = lighting ? getBlendedLightingConfig(trans) : null;
+          // Compute player screen Y for cutaway (world-space)
+          const pFov = opts.overlayOpts?.fovOriginForCutaway;
+          let playerScreenY = 0;
+          if (pFov && opts.zone?.tiles) {
+            const { x: wx, y: wy } = gridToScreen(pFov.y, pFov.x, ISO_ORIGIN, TW, TH);
+            const hh_ = getH(opts.overlayOpts?.heights, pFov.y, pFov.x);
+            playerScreenY = (wy - hh_ * HEIGHT_SCALE + TH * 0.5) * opts.camera.zoom + opts.camera.panY;
+          }
           drawMapCanvas(
             canvas, opts.zone, opts.hoveredTile, opts.camera, opts.config,
             opts.selectedEntityId, opts.editorMode,
-            { ...opts.overlayOpts, animOffset: animOffsetRef.current },
+            {
+              ...opts.overlayOpts,
+              animOffset:       animOffsetRef.current,
+              lights:           lighting ? frameLightsRef.current : [],
+              enableLighting:   lighting,
+              darkAlpha:        bLight?.darkAlpha ?? 0.78,
+              showLightRadius:  opts.overlayOpts?.showLightRadius ?? false,
+              enableCutaway:    enableCutawayRef.current,
+              cutawayTransition: trans,
+              playerScreenY,
+              interiorTiles:    interiorTilesRef.current,
+            },
           );
         }
       }
@@ -912,7 +1052,16 @@ export default function MapEditorTab({ config }) {
     };
     animRafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animRafRef.current);
-  }, []); // empty — RAF always runs, but only draws when water present
+  }, []); // empty — RAF always runs
+
+  // ── Recompute interior tiles when zone changes ────────────────────────────────
+  useEffect(() => {
+    if (zone?.tiles) {
+      interiorTilesRef.current = computeInteriorTiles(zone.tiles);
+    } else {
+      interiorTilesRef.current = new Set();
+    }
+  }, [zone?.tiles]);
 
   // ── Canvas resize ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -947,6 +1096,15 @@ export default function MapEditorTab({ config }) {
     const ghostPrefab = (editorMode === 'prefabs' && ghostPrefabTile && rotatedPrefab)
       ? { prefab: rotatedPrefab, ...ghostPrefabTile }
       : null;
+    const trans  = cutawayTransitionRef.current;
+    const bLight = enableLighting ? getBlendedLightingConfig(trans) : null;
+    // Compute player screen Y for cutaway from fovOrigin (editor proxy for player pos)
+    let playerScreenY = 0;
+    if (fovOrigin && zone?.tiles) {
+      const { x: wx, y: wy } = gridToScreen(fovOrigin.y, fovOrigin.x, ISO_ORIGIN, TW, TH);
+      const hh_ = getH(zone?.heights, fovOrigin.y, fovOrigin.x);
+      playerScreenY = (wy - hh_ * HEIGHT_SCALE + TH * 0.5) * camera.zoom + camera.panY;
+    }
     drawMapCanvas(
       canvas, zone, hoveredTile, camera, config,
       selectedEntityId, editorMode,
@@ -962,13 +1120,25 @@ export default function MapEditorTab({ config }) {
         showProps, showSurface, showPropBounds,
         selectedPropId, ghostProp, ghostPrefab,
         fovSet, showFOV,
+        // Lighting
+        lights:           enableLighting ? frameLightsRef.current : [],
+        enableLighting,
+        darkAlpha:        bLight?.darkAlpha ?? 0.78,
+        showLightRadius,
+        // Cutaway
+        enableCutaway,
+        cutawayTransition: trans,
+        playerScreenY,
+        showInteriorZones,
+        interiorTiles:    interiorTilesRef.current,
       },
     );
   }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
       refImage, refOpacity, refVisible, showGrid, debugMode, showHeightDebug,
       showProps, showSurface, showPropBounds, selectedPropId,
       ghostPropTile, ghostPrefabTile, activePropType, activePrefab, prefabRotation,
-      showFOV, fovOrigin, fovRadius]);
+      showFOV, fovOrigin, fovRadius,
+      enableLighting, enableCutaway, showLightRadius, showInteriorZones]);
 
   // ── Center camera on new map ──────────────────────────────────────────────────
   useEffect(() => {
@@ -1049,6 +1219,47 @@ export default function MapEditorTab({ config }) {
         if (editorModeRef.current === 'props') {
           setSelectedPropId(id => { if (id) deleteProp(id); return null; });
         }
+        return;
+      }
+      // E — interact with nearest container entity (uses fovOrigin as player proxy)
+      if (e.key === 'e' || e.key === 'E') {
+        const z = zoneRef.current;
+        if (!z?.entities?.length) return;
+        const fovO = drawOptsRef.current?.overlayOpts?.fovOriginForCutaway;
+        if (!fovO) return;
+        const rows = z.tiles.length, cols = z.tiles[0].length;
+        let nearest = null, nearestDist = Infinity;
+        for (const entity of z.entities) {
+          if (entity.type !== 'container') continue;
+          const grid = worldToGrid(entity.position.x, entity.position.y, rows, cols);
+          const dist = Math.hypot(grid.col - fovO.x, grid.row - fovO.y);
+          if (dist < 2.5 && dist < nearestDist) { nearest = entity; nearestDist = dist; }
+        }
+        if (!nearest) return;
+        const lootTableId = nearest.config?.lootTableId
+          ?? CONTAINER_LOOT_TABLES[nearest.subtype] ?? 'basic_chest';
+        // Use cached contents if already opened; otherwise generate deterministically
+        let contents = nearest.config?.opened && nearest.config?.contents?.length
+          ? nearest.config.contents
+          : generateLoot(lootTableId,
+              nearest.config?.seed
+                ?? nearest.id.split('').reduce((a, c) => a + c.charCodeAt(0), 0));
+        // Persist opened state and contents
+        setZone(prev => {
+          if (!prev) return prev;
+          const next = deepClone(prev);
+          const idx  = next.entities.findIndex(e => e.id === nearest.id);
+          if (idx === -1) return prev;
+          next.entities[idx].config = { ...next.entities[idx].config, opened: true, contents };
+          return next;
+        });
+        setIsDirty(true);
+        setLootPopup({
+          entityId: nearest.id,
+          title:    `${nearest.subtype.charAt(0).toUpperCase() + nearest.subtype.slice(1)} Opened`,
+          lines:    contents.map(entry => lootLine(entry)),
+        });
+        return;
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -2698,6 +2909,53 @@ export default function MapEditorTab({ config }) {
               FOV
             </button>
             <button
+              onClick={() => setEnableLighting(v => !v)}
+              title="Toggle dynamic lighting (torches, darkness)"
+              style={{
+                ...toolbarBtnStyle,
+                color:  enableLighting ? '#ffb840' : P.muted,
+                border: `1px solid ${enableLighting ? '#ffb840' : P.border}`,
+              }}
+            >
+              LIGHTS
+            </button>
+            {enableLighting && (
+              <button
+                onClick={() => setShowLightRadius(v => !v)}
+                title="Show light radius debug circles"
+                style={{
+                  ...toolbarBtnStyle,
+                  color:  showLightRadius ? '#ffb840' : P.muted,
+                  border: `1px solid ${showLightRadius ? '#ffb840' : P.border}`,
+                  fontSize: 8,
+                }}
+              >
+                LRADIUS
+              </button>
+            )}
+            <button
+              onClick={() => setEnableCutaway(v => !v)}
+              title="Enable wall cutaway when FOV origin is inside a building"
+              style={{
+                ...toolbarBtnStyle,
+                color:  enableCutaway ? '#a0e0ff' : P.muted,
+                border: `1px solid ${enableCutaway ? '#a0e0ff' : P.border}`,
+              }}
+            >
+              CUTAWAY
+            </button>
+            <button
+              onClick={() => setShowInteriorZones(v => !v)}
+              title="Highlight interior tiles (flood-fill from edges)"
+              style={{
+                ...toolbarBtnStyle,
+                color:  showInteriorZones ? '#b080ff' : P.muted,
+                border: `1px solid ${showInteriorZones ? '#b080ff' : P.border}`,
+              }}
+            >
+              INTERIOR
+            </button>
+            <button
               onClick={handleScreenshot}
               disabled={!zone}
               title="Export canvas as PNG"
@@ -2736,6 +2994,49 @@ export default function MapEditorTab({ config }) {
           onMouseLeave={handleMouseLeave}
           onContextMenu={e => e.preventDefault()}
         />
+
+        {/* ── Loot popup overlay ────────────────────────────────────────────── */}
+        {lootPopup && (
+          <div style={{
+            position: 'absolute', bottom: 28, left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'rgba(10,10,16,0.97)',
+            border: `1px solid ${P.accent}`,
+            padding: '14px 20px',
+            minWidth: 220, maxWidth: 320,
+            zIndex: 10,
+            pointerEvents: 'auto',
+            boxShadow: `0 0 24px rgba(0,212,255,0.18)`,
+          }}>
+            <div style={{
+              fontSize: 10, color: P.accent, letterSpacing: 3,
+              marginBottom: 10,
+              borderBottom: `1px solid ${P.border}`, paddingBottom: 7,
+            }}>
+              {lootPopup.title.toUpperCase()}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {lootPopup.lines.map((line, i) => (
+                <div key={i} style={{
+                  fontFamily: 'monospace', fontSize: 13, color: P.text, letterSpacing: 1,
+                }}>
+                  {line}
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={() => setLootPopup(null)}
+              style={{
+                ...toolbarBtnStyle,
+                marginTop: 12, width: '100%',
+                fontSize: 9, letterSpacing: 3,
+                color: P.accent, borderColor: P.accent,
+              }}
+            >
+              CLOSE
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
