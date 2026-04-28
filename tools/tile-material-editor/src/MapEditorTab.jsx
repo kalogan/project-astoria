@@ -35,6 +35,10 @@ import {
 import {
   generateLoot, lootLine, CONTAINER_LOOT_TABLES,
 } from './systems/lootTables';
+import {
+  LIGHTING_PRESETS, presetDarkAlpha,
+} from './data/lightingPresets';
+import { LIGHT_PRESETS } from './systems/lightingSystem';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TW             = 64;
@@ -44,6 +48,41 @@ const FALLBACK_ZONES = ['Cameron_Start', 'Cameron_Forest', 'zone_01', 'zone_02']
 const ZOOM_MIN       = 0.25;
 const ZOOM_MAX       = 4;
 const HISTORY_LIMIT  = 50;
+
+// ── Module-level helpers ───────────────────────────────────────────────────────
+
+/** Deterministic per-tile brightness hash (0–1). */
+function tileHash(row, col) {
+  let h = ((row * 2654435761 + col * 2246822519) >>> 0);
+  h ^= h >>> 16;
+  h  = Math.imul(h, 0x45d9f3b) >>> 0;
+  h ^= h >>> 16;
+  return h / 0xFFFFFFFF;
+}
+
+function hexToRgb(hex) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+function rgbToHex({ r, g, b }) {
+  return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('');
+}
+
+/** Screen-space hit test for manually-placed lights (zone.lights). */
+function lightHitTest(mouseX, mouseY, zone, camera, heights) {
+  if (!zone?.lights?.length) return null;
+  const { panX, panY, zoom } = camera;
+  const HIT_R = 16;
+  for (const light of zone.lights) {
+    const h = heights?.[light.y]?.[light.x] ?? 0;
+    const { x: wx, y: wyBase } = gridToScreen(light.y, light.x, ISO_ORIGIN, TW, TH);
+    const wy = wyBase - h * HEIGHT_SCALE;
+    const sx = wx * zoom + panX;
+    const sy = (wy + TH * 0.5) * zoom + panY;
+    if (Math.hypot(mouseX - sx, mouseY - sy) <= HIT_R) return light;
+  }
+  return null;
+}
 
 // ── Entity palette ─────────────────────────────────────────────────────────────
 const ENTITY_PALETTE = [
@@ -257,6 +296,10 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     // Interior cutaway
     enableCutaway = false, cutawayTransition = 0, playerScreenY = 0,
     showInteriorZones = false, interiorTiles = null,
+    // Lighting authoring overlay
+    selectedLightId = null, showLightMarkers = false,
+    // Tile variation
+    tileVariation = true,
   } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
@@ -341,6 +384,24 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     } else {
       const tColor = applyHeightBrightness(pickTileColor(type, r, c, tiles, config), h);
       drawIsoTile(ctx, sx, sy, TW, TH, tColor, type, config, cliffR, cliffL);
+      // Per-tile brightness variation — breaks the uniform grid look
+      if (tileVariation && !debugMode) {
+        const vf = tileHash(r, c);
+        const shift = (vf - 0.5) * 0.13; // ±0.065 alpha overlay
+        if (Math.abs(shift) > 0.008) {
+          ctx.save();
+          ctx.globalAlpha = Math.abs(shift);
+          ctx.fillStyle   = shift > 0 ? 'rgba(255,255,255,1)' : 'rgba(0,0,0,1)';
+          ctx.beginPath();
+          ctx.moveTo(sx,          sy);
+          ctx.lineTo(sx + TW / 2, sy + TH / 2);
+          ctx.lineTo(sx,          sy + TH);
+          ctx.lineTo(sx - TW / 2, sy + TH / 2);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+      }
     }
 
     // Height-based shadow from uphill neighbours (all tile types)
@@ -737,6 +798,72 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     ctx.fillText(def.icon ?? '?', sx, sy);
   }
   ctx.restore();
+
+  // ── 6. Light authoring markers (screen space, lighting editor mode) ───────────
+  if (showLightMarkers && zone?.lights?.length) {
+    ctx.save();
+    for (const light of zone.lights) {
+      const h = getH(heights, light.y, light.x);
+      const { x: wx, y: wyBase } = gridToScreen(light.y, light.x, ISO_ORIGIN, TW, TH);
+      const wy = wyBase - h * HEIGHT_SCALE;
+      const sx = wx * zoom + panX;
+      const sy = (wy + TH * 0.5) * zoom + panY;
+      const isSelected = light.id === selectedLightId;
+      const col = typeof light.color === 'object'
+        ? light.color
+        : { r: 255, g: 178, b: 75 };
+      const { r, g, b } = col;
+
+      // Soft glow halo
+      const gr = ctx.createRadialGradient(sx, sy, 0, sx, sy, 20);
+      gr.addColorStop(0,   `rgba(${r},${g},${b},0.55)`);
+      gr.addColorStop(0.5, `rgba(${r},${g},${b},0.18)`);
+      gr.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+      ctx.fillStyle = gr;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 20, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Marker disc
+      ctx.beginPath();
+      ctx.arc(sx + 1, sy + 1, 8, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(sx, sy, 8, 0, Math.PI * 2);
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(255,255,255,0.45)';
+      ctx.lineWidth   = isSelected ? 2.5 : 1.5;
+      ctx.stroke();
+
+      // Light type letter
+      ctx.fillStyle    = 'rgba(0,0,0,0.8)';
+      ctx.font         = 'bold 7px monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText((light.type ?? 'T').charAt(0).toUpperCase(), sx, sy);
+
+      // Selected: radius preview ring + property badge
+      if (isSelected) {
+        const rPx = (light.radius ?? 150) * zoom;
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = `rgba(${r},${g},${b},0.55)`;
+        ctx.lineWidth   = 1.5;
+        ctx.beginPath();
+        ctx.arc(sx, sy, rPx, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Label
+        ctx.fillStyle    = `rgba(${r},${g},${b},0.9)`;
+        ctx.font         = '8px monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(`${light.type}  r${light.radius ?? 150}`, sx, sy - 11);
+      }
+    }
+    ctx.restore();
+  }
 }
 
 // ── Local UI helpers ──────────────────────────────────────────────────────────
@@ -846,6 +973,21 @@ export default function MapEditorTab({ config }) {
   // ── Loot popup ────────────────────────────────────────────────────────────────
   const [lootPopup, setLootPopup] = useState(null); // { entityId, title, lines[] }
 
+  // ── Lighting authoring ────────────────────────────────────────────────────────
+  const [activeLightType,   setActiveLightType]   = useState('torch');
+  const [selectedLightId,   setSelectedLightId]   = useState(null);
+  const [activeLightPreset, setActiveLightPreset] = useState('tavern_warm');
+  const [showLightMarkers,  setShowLightMarkers]  = useState(true);
+
+  // ── Prop scatter sub-tool ─────────────────────────────────────────────────────
+  const [propTool,       setPropTool]      = useState('paint');  // 'paint'|'scatter'
+  const [scatterDensity, setScatterDensity] = useState(0.35);
+  const [scatterRadius,  setScatterRadius]  = useState(5);
+  const [isScattering,   setIsScattering]  = useState(false);
+
+  // ── Tile variation ────────────────────────────────────────────────────────────
+  const [tileVariation, setTileVariation] = useState(true);
+
   // ── Interior tiles cache ──────────────────────────────────────────────────────
   const interiorTilesRef = useRef(new Set());
 
@@ -909,6 +1051,7 @@ export default function MapEditorTab({ config }) {
   const animOffsetRef        = useRef(0);   // ever-increasing time for water animation
   const animRafRef           = useRef(null);
   const drawOptsRef          = useRef(null); // latest draw params for RAF loop
+  const frameLightsRef       = useRef([]);  // built each RAF tick, read by draw calls
 
   useEffect(() => { cameraRef.current            = camera; },           [camera]);
   useEffect(() => { zoneRef.current              = zone; },             [zone]);
@@ -922,6 +1065,16 @@ export default function MapEditorTab({ config }) {
   useEffect(() => { selectedFlowDirRef.current   = selectedFlowDir; },  [selectedFlowDir]);
   useEffect(() => { enableLightingRef.current      = enableLighting; },    [enableLighting]);
   useEffect(() => { enableCutawayRef.current       = enableCutaway; },     [enableCutaway]);
+
+  // Stable refs for new fields
+  const activeLightTypeRef  = useRef(activeLightType);
+  const scatterDensityRef   = useRef(scatterDensity);
+  const scatterRadiusRef    = useRef(scatterRadius);
+  const propToolRef         = useRef(propTool);
+  useEffect(() => { activeLightTypeRef.current = activeLightType; }, [activeLightType]);
+  useEffect(() => { scatterDensityRef.current  = scatterDensity; },  [scatterDensity]);
+  useEffect(() => { scatterRadiusRef.current   = scatterRadius; },   [scatterRadius]);
+  useEffect(() => { propToolRef.current        = propTool; },        [propTool]);
   useEffect(() => { activePropTypeRef.current      = activePropType; },     [activePropType]);
   useEffect(() => { activeSurfaceRef.current       = activeSurface; },      [activeSurface]);
   useEffect(() => { surfaceBrushSizeRef.current    = surfaceBrushSize; },   [surfaceBrushSize]);
@@ -969,6 +1122,11 @@ export default function MapEditorTab({ config }) {
         showInteriorZones,
         interiorTiles:     interiorTilesRef.current,
         fovOriginForCutaway: fovOrigin,
+        // Lighting authoring
+        selectedLightId,
+        showLightMarkers:  editorMode === 'lighting' || showLightMarkers,
+        // Tile variation
+        tileVariation,
       },
     };
   }); // no deps — runs after every render
@@ -976,7 +1134,6 @@ export default function MapEditorTab({ config }) {
   // ── Water + lighting animation RAF loop ──────────────────────────────────────
   // Redraws the canvas each frame when: water is present, lighting is on,
   // or cutaway transition is in progress.
-  const frameLightsRef = useRef([]);
 
   useEffect(() => {
     let lastTime = performance.now();
@@ -1131,6 +1288,11 @@ export default function MapEditorTab({ config }) {
         playerScreenY,
         showInteriorZones,
         interiorTiles:    interiorTilesRef.current,
+        // Lighting authoring
+        selectedLightId,
+        showLightMarkers: editorMode === 'lighting' || showLightMarkers,
+        // Tile variation
+        tileVariation,
       },
     );
   }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
@@ -1138,7 +1300,8 @@ export default function MapEditorTab({ config }) {
       showProps, showSurface, showPropBounds, selectedPropId,
       ghostPropTile, ghostPrefabTile, activePropType, activePrefab, prefabRotation,
       showFOV, fovOrigin, fovRadius,
-      enableLighting, enableCutaway, showLightRadius, showInteriorZones]);
+      enableLighting, enableCutaway, showLightRadius, showInteriorZones,
+      selectedLightId, showLightMarkers, tileVariation]);
 
   // ── Center camera on new map ──────────────────────────────────────────────────
   useEffect(() => {
@@ -1214,10 +1377,13 @@ export default function MapEditorTab({ config }) {
         }
         return;
       }
-      // Delete / Backspace — remove selected prop
+      // Delete / Backspace — remove selected prop or light
       if ((e.key === 'Delete' || e.key === 'Backspace') && !e.ctrlKey) {
         if (editorModeRef.current === 'props') {
           setSelectedPropId(id => { if (id) deleteProp(id); return null; });
+        }
+        if (editorModeRef.current === 'lighting') {
+          setSelectedLightId(id => { if (id) deleteLight(id); return null; });
         }
         return;
       }
@@ -1264,7 +1430,7 @@ export default function MapEditorTab({ config }) {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [undo, redo, deleteProp]);
+  }, [undo, redo, deleteProp, deleteLight]);
 
   // ── Zone load ─────────────────────────────────────────────────────────────────
   const loadZoneById = useCallback(async (id) => {
@@ -1539,6 +1705,92 @@ export default function MapEditorTab({ config }) {
     setIsDirty(true);
   }, [commitHistory]);
 
+  // ── Light CRUD (zone.lights) ──────────────────────────────────────────────────
+  const placeLight = useCallback((row, col) => {
+    const preset = LIGHT_PRESETS[activeLightTypeRef.current] ?? LIGHT_PRESETS.torch;
+    const id = `light_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+    const light = {
+      id,
+      type:         activeLightTypeRef.current,
+      x:            col,
+      y:            row,
+      radius:       preset.radius,
+      intensity:    preset.intensity,
+      color:        { ...preset.color },
+      flicker:      preset.flicker,
+      flickerSpeed: 1.0,
+    };
+    commitHistory();
+    setZone(prev => {
+      if (!prev) return prev;
+      return { ...prev, lights: [...(prev.lights ?? []), light] };
+    });
+    setSelectedLightId(id);
+    setIsDirty(true);
+  }, [commitHistory]);
+
+  const deleteLight = useCallback((id) => {
+    commitHistory();
+    setZone(prev => {
+      if (!prev) return prev;
+      return { ...prev, lights: (prev.lights ?? []).filter(l => l.id !== id) };
+    });
+    setSelectedLightId(null);
+    setIsDirty(true);
+  }, [commitHistory]);
+
+  const updateLight = useCallback((id, updates) => {
+    setZone(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        lights: (prev.lights ?? []).map(l => l.id === id ? { ...l, ...updates } : l),
+      };
+    });
+    setIsDirty(true);
+  }, []);
+
+  // ── Prop scatter ───────────────────────────────────────────────────────────────
+  const scatterProps = useCallback((row, col) => {
+    const z = zoneRef.current;
+    if (!z) return;
+    const radius  = Math.max(1, Math.floor(scatterRadiusRef.current / 2));
+    const density = scatterDensityRef.current;
+    const pType   = activePropTypeRef.current;
+    const rows_   = z.tiles.length;
+    const cols_   = z.tiles[0].length;
+    const def     = PROP_DEFS[pType];
+    const existingProps = z.props ?? [];
+    const newProps = [];
+
+    for (let dr = -radius; dr <= radius; dr++) {
+      for (let dc = -radius; dc <= radius; dc++) {
+        if (Math.random() > density) continue;
+        const r = row + dr, c = col + dc;
+        if (r < 0 || r >= rows_ || c < 0 || c >= cols_) continue;
+        if (z.tiles[r][c] === 0) continue;
+        const combined = [...existingProps, ...newProps];
+        if (!canPlaceProp(c, r, pType, combined, z.tiles)) continue;
+        newProps.push({
+          id:       `prop_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+          type:     pType,
+          x:        c,
+          y:        r,
+          offsetX:  (Math.random() - 0.5) * 0.44,
+          offsetY:  (Math.random() - 0.5) * 0.32,
+          rotation: def?.anchor !== 'wall' ? Math.random() * Math.PI * 2 : 0,
+          scale:    0.72 + Math.random() * 0.52,
+        });
+      }
+    }
+    if (!newProps.length) return;
+    setZone(prev => {
+      if (!prev) return prev;
+      return { ...prev, props: [...(prev.props ?? []), ...newProps] };
+    });
+    setIsDirty(true);
+  }, []);
+
   // ── Surface paint ─────────────────────────────────────────────────────────────
   const paintSurface = useCallback((row, col, erase = false) => {
     const z = zoneRef.current;
@@ -1630,22 +1882,42 @@ export default function MapEditorTab({ config }) {
       } else if (editorModeRef.current === 'props') {
         const tile = hitTest(mx, my);
         if (tile) {
-          // Right-click or Shift-click near an existing prop: select or delete
           const z = zoneRef.current;
-          const propsArr = z?.props ?? [];
-          // Simple nearest-prop hit: check if any prop is within 1 tile of click
-          const nearby = propsArr.find(p => Math.abs(p.x - tile.col) < 1.5 && Math.abs(p.y - tile.row) < 1.5);
-          if (e.shiftKey && nearby) {
-            deleteProp(nearby.id);
-          } else if (!e.shiftKey && nearby) {
-            setSelectedPropId(nearby.id);
+          if (propToolRef.current === 'scatter') {
+            scatterProps(tile.row, tile.col);
+            setIsScattering(true);
           } else {
-            commitHistory();
-            placeProp(tile.col, tile.row);
+            // Paint mode: shift+click near prop selects/deletes; otherwise place
+            const propsArr = z?.props ?? [];
+            const nearby   = propsArr.find(p => Math.abs(p.x - tile.col) < 1.5 && Math.abs(p.y - tile.row) < 1.5);
+            if (e.shiftKey && nearby) {
+              deleteProp(nearby.id);
+            } else if (!e.shiftKey && nearby) {
+              setSelectedPropId(nearby.id);
+            } else {
+              commitHistory();
+              placeProp(tile.col, tile.row);
+            }
           }
         } else {
           isPanningRef.current = true;
           lastMouseRef.current = { x: e.clientX, y: e.clientY };
+        }
+
+      } else if (editorModeRef.current === 'lighting') {
+        const z = zoneRef.current;
+        // Hit-test existing lights first
+        const hitLight = lightHitTest(mx, my, z, cameraRef.current, z?.heights);
+        if (hitLight) {
+          setSelectedLightId(hitLight.id);
+        } else {
+          const tile = hitTest(mx, my);
+          if (tile) {
+            placeLight(tile.row, tile.col);
+          } else {
+            isPanningRef.current = true;
+            lastMouseRef.current = { x: e.clientX, y: e.clientY };
+          }
         }
 
       } else if (editorModeRef.current === 'surface') {
@@ -1709,7 +1981,7 @@ export default function MapEditorTab({ config }) {
       }
     }
   }, [hitTest, applyTileTool, placeEntity, commitHistory, adjustHeight,
-      placeProp, deleteProp, paintSurface]);
+      placeProp, deleteProp, paintSurface, placeLight, scatterProps]);
 
   const handleMouseMove = useCallback((e) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -1740,10 +2012,13 @@ export default function MapEditorTab({ config }) {
     if (editorModeRef.current === 'surface' && isPaintingSurface && tile) {
       paintSurface(tile.row, tile.col, false);
     }
-    // Ghost prop preview
+    // Ghost prop preview / scatter drag
     if (editorModeRef.current === 'props') {
       if (tile) {
         const z   = zoneRef.current;
+        if (isScattering && tile) {
+          scatterProps(tile.row, tile.col);
+        }
         const valid = z ? canPlaceProp(tile.col, tile.row, activePropTypeRef.current,
                                        z.props ?? [], z.tiles) : false;
         setGhostPropTile({ x: tile.col, y: tile.row, valid });
@@ -1767,18 +2042,20 @@ export default function MapEditorTab({ config }) {
         setGhostPrefabTile(null);
       }
     }
-  }, [hitTest, applyTileTool, adjustHeight, paintSurface, isPaintingSurface]);
+  }, [hitTest, applyTileTool, adjustHeight, paintSurface, isPaintingSurface, isScattering, scatterProps]);
 
   const handleMouseUp = useCallback(() => {
     isPanningRef.current = false;
     setIsPainting(false);
     setIsPaintingSurface(false);
+    setIsScattering(false);
   }, []);
 
   const handleMouseLeave = useCallback(() => {
     isPanningRef.current = false;
     setIsPainting(false);
     setIsPaintingSurface(false);
+    setIsScattering(false);
     setHovered(null);
     setGhostPropTile(null);
     setGhostPrefabTile(null);
@@ -1809,7 +2086,10 @@ export default function MapEditorTab({ config }) {
   const switchMode = useCallback((mode) => {
     setEditorMode(mode);
     setSelectedEntityId(null);
+    setSelectedLightId(null);
     setHovered(null);
+    setGhostPropTile(null);
+    setGhostPrefabTile(null);
   }, []);
 
   // ── Derived ───────────────────────────────────────────────────────────────────
@@ -1846,7 +2126,7 @@ export default function MapEditorTab({ config }) {
             })}
           </div>
           <div style={{ display: 'flex', borderTop: `1px solid ${P.border}` }}>
-            {[['props', 'PROPS'], ['surface', 'SURF'], ['prefabs', 'PFB']].map(([mode, label]) => {
+            {[['props', 'PROPS'], ['surface', 'SURF'], ['prefabs', 'PFB'], ['lighting', 'LGT']].map(([mode, label]) => {
               const active = editorMode === mode;
               return (
                 <button key={mode} onClick={() => switchMode(mode)} style={{
@@ -2514,6 +2794,62 @@ export default function MapEditorTab({ config }) {
                 </div>
               </Section>
 
+              {/* Prop tool selector: paint vs scatter */}
+              <Section title="TOOL">
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {[['paint', 'PAINT'], ['scatter', 'SCATTER']].map(([id, label]) => {
+                    const active = propTool === id;
+                    return (
+                      <button key={id} onClick={() => setPropTool(id)} style={{
+                        flex: 1,
+                        background: active ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        color: active ? P.accent : P.muted,
+                        fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
+                        padding: '6px 4px', cursor: 'pointer',
+                      }}>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {propTool === 'scatter' && (
+                  <>
+                    <FieldRow label="DENSITY">
+                      <input
+                        type="range" min={0.05} max={1} step={0.05}
+                        value={scatterDensity}
+                        onChange={e => setScatterDensity(parseFloat(e.target.value))}
+                        style={{ flex: 1, accentColor: P.accent }}
+                      />
+                      <span style={{ fontSize: 9, color: P.muted, width: 30, textAlign: 'right', flexShrink: 0 }}>
+                        {Math.round(scatterDensity * 100)}%
+                      </span>
+                    </FieldRow>
+                    <FieldRow label="RADIUS">
+                      <div style={{ display: 'flex', gap: 4, flex: 1 }}>
+                        {[3, 5, 9, 15].map(s => (
+                          <button key={s} onClick={() => setScatterRadius(s)} style={{
+                            flex: 1,
+                            background: scatterRadius === s ? 'rgba(0,212,255,0.12)' : 'transparent',
+                            border: `1px solid ${scatterRadius === s ? P.accent : P.border}`,
+                            color: scatterRadius === s ? P.accent : P.muted,
+                            fontFamily: 'monospace', fontSize: 9,
+                            padding: '5px 0', cursor: 'pointer',
+                          }}>
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </FieldRow>
+                    <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                      CLICK+DRAG to scatter selected<br />
+                      prop type randomly in area
+                    </div>
+                  </>
+                )}
+              </Section>
+
               <Section title="VIEW">
                 <div style={{ display: 'flex', gap: 4 }}>
                   <button onClick={() => setShowProps(v => !v)} style={{
@@ -2727,6 +3063,204 @@ export default function MapEditorTab({ config }) {
                   Preview shown on hover
                 </div>
               </Section>
+            </>
+          )}
+
+          {/* ── LIGHTING MODE ────────────────────────────────────────────────── */}
+          {editorMode === 'lighting' && (
+            <>
+              {/* Light type selector */}
+              <Section title="LIGHT TYPE">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {Object.entries(LIGHT_PRESETS).map(([id, preset]) => {
+                    const active = activeLightType === id;
+                    const { r, g, b } = preset.color;
+                    return (
+                      <button key={id} onClick={() => setActiveLightType(id)} style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        padding: '7px 10px', cursor: 'pointer', width: '100%',
+                      }}>
+                        <span style={{
+                          width: 12, height: 12, borderRadius: '50%', flexShrink: 0,
+                          background: `rgb(${r},${g},${b})`,
+                          boxShadow: `0 0 6px rgb(${r},${g},${b})`,
+                        }} />
+                        <span style={{
+                          fontFamily: 'monospace', fontSize: 10,
+                          color: active ? P.accent : P.muted, letterSpacing: 1,
+                        }}>
+                          {id.toUpperCase()}
+                        </span>
+                        <span style={{ marginLeft: 'auto', fontSize: 8, color: P.muted }}>
+                          r{preset.radius}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                  CLICK tile to place light<br />
+                  CLICK light to select · DEL removes<br />
+                  Enable LIGHTS in toolbar to preview
+                </div>
+              </Section>
+
+              {/* Atmosphere presets */}
+              <Section title="PRESETS">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {Object.values(LIGHTING_PRESETS).map(preset => (
+                    <button key={preset.id} onClick={() => {
+                      setActiveLightPreset(preset.id);
+                      // Optionally wire preset darkAlpha into the lighting system
+                    }} style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      background: activeLightPreset === preset.id ? 'rgba(0,212,255,0.1)' : 'transparent',
+                      border: `1px solid ${activeLightPreset === preset.id ? P.accent : P.border}`,
+                      padding: '6px 10px', cursor: 'pointer', width: '100%',
+                    }}>
+                      <span style={{ fontSize: 14 }}>{preset.emoji}</span>
+                      <span style={{
+                        fontFamily: 'monospace', fontSize: 10,
+                        color: activeLightPreset === preset.id ? P.accent : P.muted, letterSpacing: 1,
+                      }}>
+                        {preset.label.toUpperCase()}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => {
+                    if (!zone) return;
+                    const preset = LIGHTING_PRESETS[activeLightPreset];
+                    if (!preset) return;
+                    // Apply preset dark alpha + store on zone
+                    setZone(prev => prev ? { ...prev, lightingPreset: activeLightPreset } : prev);
+                    setIsDirty(true);
+                  }}
+                  style={{ ...btnStyle(P.accent), width: '100%', fontSize: 9 }}
+                >
+                  APPLY PRESET TO MAP
+                </button>
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1 }}>
+                  Saves preset ID into map JSON.<br />
+                  Game runtime reads it for ambience.
+                </div>
+              </Section>
+
+              {/* Show markers toggle */}
+              <Section title="VIEW">
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button onClick={() => setShowLightMarkers(v => !v)} style={{
+                    flex: 1,
+                    background: showLightMarkers ? 'rgba(0,212,255,0.12)' : 'transparent',
+                    border: `1px solid ${showLightMarkers ? P.accent : P.border}`,
+                    color: showLightMarkers ? P.accent : P.muted,
+                    fontFamily: 'monospace', fontSize: 9, padding: '5px 0', cursor: 'pointer',
+                  }}>
+                    {showLightMarkers ? 'MARKERS ON' : 'MARKERS OFF'}
+                  </button>
+                  <button onClick={() => setTileVariation(v => !v)} style={{
+                    flex: 1,
+                    background: tileVariation ? 'rgba(0,212,255,0.12)' : 'transparent',
+                    border: `1px solid ${tileVariation ? P.accent : P.border}`,
+                    color: tileVariation ? P.accent : P.muted,
+                    fontFamily: 'monospace', fontSize: 9, padding: '5px 0', cursor: 'pointer',
+                  }}>
+                    VARIATION
+                  </button>
+                </div>
+              </Section>
+
+              {/* Zone light count */}
+              <Section title="LIGHTS">
+                <div style={{ fontSize: 10, color: P.muted, letterSpacing: 1 }}>
+                  {zone?.lights?.length ?? 0} lights in this map
+                </div>
+                {zone?.lights?.length > 0 && (
+                  <button
+                    onClick={() => {
+                      commitHistory();
+                      setZone(prev => prev ? { ...prev, lights: [] } : prev);
+                      setSelectedLightId(null);
+                      setIsDirty(true);
+                    }}
+                    style={{ ...btnStyle(P.warn), width: '100%', fontSize: 9 }}
+                  >
+                    CLEAR ALL LIGHTS
+                  </button>
+                )}
+              </Section>
+
+              {/* Selected light editor */}
+              {selectedLightId && (() => {
+                const light = zone?.lights?.find(l => l.id === selectedLightId);
+                if (!light) return null;
+                const hexColor = rgbToHex(typeof light.color === 'object'
+                  ? light.color : { r: 255, g: 178, b: 75 });
+                return (
+                  <Section title="SELECTED LIGHT">
+                    <FieldRow label="TYPE">
+                      <span style={{ fontSize: 11, color: P.text }}>{light.type}</span>
+                    </FieldRow>
+                    <FieldRow label="POS">
+                      <span style={{ fontSize: 11, color: P.muted }}>col {light.x}, row {light.y}</span>
+                    </FieldRow>
+                    <FieldRow label="RADIUS">
+                      <input
+                        type="range" min={40} max={500} step={10}
+                        value={light.radius ?? 150}
+                        onChange={e => updateLight(light.id, { radius: parseInt(e.target.value) })}
+                        style={{ flex: 1, accentColor: P.accent }}
+                      />
+                      <span style={{ fontSize: 9, color: P.muted, width: 34, textAlign: 'right', flexShrink: 0 }}>
+                        {light.radius ?? 150}
+                      </span>
+                    </FieldRow>
+                    <FieldRow label="INTENS">
+                      <input
+                        type="range" min={0.1} max={1} step={0.05}
+                        value={light.intensity ?? 0.9}
+                        onChange={e => updateLight(light.id, { intensity: parseFloat(e.target.value) })}
+                        style={{ flex: 1, accentColor: P.accent }}
+                      />
+                      <span style={{ fontSize: 9, color: P.muted, width: 34, textAlign: 'right', flexShrink: 0 }}>
+                        {((light.intensity ?? 0.9) * 100).toFixed(0)}%
+                      </span>
+                    </FieldRow>
+                    <FieldRow label="COLOR">
+                      <input
+                        type="color"
+                        value={hexColor}
+                        onChange={e => updateLight(light.id, { color: hexToRgb(e.target.value) })}
+                        style={{ width: 36, height: 24, border: 'none', background: 'none', cursor: 'pointer' }}
+                      />
+                      <span style={{ fontSize: 9, color: P.muted, letterSpacing: 1 }}>{hexColor}</span>
+                    </FieldRow>
+                    <FieldRow label="FLICKER">
+                      <button
+                        onClick={() => updateLight(light.id, { flicker: !light.flicker })}
+                        style={{
+                          background: light.flicker ? 'rgba(255,184,64,0.15)' : 'transparent',
+                          border: `1px solid ${light.flicker ? '#ffb840' : P.border}`,
+                          color: light.flicker ? '#ffb840' : P.muted,
+                          fontFamily: 'monospace', fontSize: 9, letterSpacing: 2,
+                          padding: '4px 14px', cursor: 'pointer',
+                        }}
+                      >
+                        {light.flicker ? 'ON' : 'OFF'}
+                      </button>
+                    </FieldRow>
+                    <button
+                      onClick={() => deleteLight(light.id)}
+                      style={{ ...btnStyle(P.warn), width: '100%', marginTop: 2 }}
+                    >
+                      DELETE LIGHT
+                    </button>
+                  </Section>
+                );
+              })()}
             </>
           )}
 
