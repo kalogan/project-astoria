@@ -51,27 +51,22 @@ function easeOut(t)     { return 1 - (1 - t) * (1 - t); }
 const ANIMS = {
 
   // ── IDLE — subtle standing breath ─────────────────────────────────────────
-  // Group bobs ±0.025 units (~1.5 px at frustum 13).  Barely noticeable when
-  // standing still, but proves the system is alive.
   idle: {
     hz: 1.4,
     apply(comp, phase) {
       const r = comp.restG;
-      comp.pg.position.y = r.py + Math.sin(phase) * 0.025;
+      comp.pg.position.y = r.py + Math.sin(phase) * 0.015;
     },
   },
 
-  // ── WALK — pronounced bounce + lean ─────────────────────────────────────
+  // ── WALK — bounce + lean (60 % of original amplitudes) ──────────────────
   // Math.abs(sin) = "double bounce" = two footfall pulses per cycle.
-  // At hz 3.2 and player speed 5 the bob rate matches the visual stride.
-  // Bob 0.14 units ≈ 8-9 px; lean ±0.13 rad ≈ 7° — clearly readable.
   walk: {
     hz: 3.2,
     apply(comp, phase) {
       const r = comp.restG;
-      // Double-bounce: peak twice per cycle (left step + right step)
-      const bob  = Math.abs(Math.sin(phase)) * 0.14 - 0.035;
-      const lean = Math.sin(phase) * 0.13;
+      const bob  = Math.abs(Math.sin(phase)) * 0.084 - 0.021;
+      const lean = Math.sin(phase) * 0.078;
       comp.pg.position.y = r.py + bob;
       comp.pg.rotation.z = r.rz + lean;
     },
@@ -114,16 +109,19 @@ const ANIMS = {
     },
   },
 
-  // ── HIT — stagger: whole group lurches back then rights itself ────────────
-  // Bell-curve (sin π·t): smooth enter and exit.
-  // Lurch backward +Z, tilt ±rz to simulate stagger direction.
+  // ── HIT — stagger tilt + slight hop ─────────────────────────────────────
+  // IMPORTANT: never touch position.x/z on the group — for enemies comp.pg
+  // IS e.mesh, and movement writes to position.x/z every frame.  Modifying
+  // those axes here would teleport the enemy back to wherever restG was
+  // captured.  Only rotation.z and position.y are safe (movement never
+  // touches them).
   hit: {
     duration: 0.20,
     apply(comp, t) {
-      const bell = Math.sin(t * Math.PI);
+      const bell = Math.sin(t * Math.PI);   // 0 → peak → 0
       const r = comp.restG;
-      comp.pg.position.z = r.pz + bell * 0.14;       // lurch back
-      comp.pg.rotation.z = r.rz + bell * -0.22;      // stagger tilt
+      comp.pg.rotation.z = r.rz + bell * -0.28;   // stagger tilt
+      comp.pg.position.y = r.py + bell *  0.06;   // slight hop up
     },
   },
 };
@@ -176,6 +174,11 @@ class AnimComp {
   triggerOnce(animKey) {
     const anim = ANIMS[animKey];
     if (!anim || anim.duration === undefined) return;
+    // Refresh group rest pose to CURRENT position before starting.
+    // Enemies move every frame — stale restG.pz would teleport them.
+    this.restG.py = this.pg.position.y;
+    this.restG.pz = this.pg.position.z;
+    this.restG.rz = this.pg.rotation.z;
     this._resetToRest();
     this.onceAnim     = anim;
     this.onceTimer    = 0;
