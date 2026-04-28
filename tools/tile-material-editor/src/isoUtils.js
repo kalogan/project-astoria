@@ -38,3 +38,26 @@ export function screenToGrid(sx, sy, origin, TW, TH, rows, cols) {
   if (row < 0 || row >= rows || col < 0 || col >= cols) return null;
   return { row, col };
 }
+
+/**
+ * Convert grid (row, col) to zone world-space position { x, y }.
+ * Matches the coordinate origin used by tileRenderer.js and zone JSON files
+ * (world origin = centre of the map; y here is world Z, not vertical Y).
+ */
+export function gridToWorld(row, col, rows, cols) {
+  return {
+    x: col - (cols - 1) / 2,
+    y: row - (rows - 1) / 2,
+  };
+}
+
+/**
+ * Convert a zone world-space position { x, y } back to grid (row, col).
+ * Rounds to nearest integer so the result is always a valid grid cell.
+ */
+export function worldToGrid(worldX, worldZ, rows, cols) {
+  return {
+    col: Math.round(worldX + (cols - 1) / 2),
+    row: Math.round(worldZ + (rows - 1) / 2),
+  };
+}
