@@ -11,12 +11,28 @@ export const P = {
 };
 
 // ── Tile system ────────────────────────────────────────────────────────────────
-export const TILE_TYPES = { FLOOR: 1, WALL: 2, ROAD: 3 };
+// Legacy game tile IDs (1–3) — used by tileRenderer.js and collider.js.
+// Terrain tile IDs (10–13) — editor-only autotile types; defined in autotile.js.
+export const TILE_TYPES = {
+  // Legacy (game-runtime) types
+  FLOOR: 1,
+  WALL:  2,
+  ROAD:  3,
+  // Terrain (editor autotile) types — mirrored from autotile.js for convenience
+  GRASS: 10,
+  DIRT:  11,
+  PATH:  12,
+  STONE: 13,
+};
 
 export const TILE_LABELS = {
   [TILE_TYPES.FLOOR]: 'Floor',
   [TILE_TYPES.WALL]:  'Wall',
   [TILE_TYPES.ROAD]:  'Road',
+  [TILE_TYPES.GRASS]: 'Grass',
+  [TILE_TYPES.DIRT]:  'Dirt',
+  [TILE_TYPES.PATH]:  'Path',
+  [TILE_TYPES.STONE]: 'Stone',
 };
 
 export const T_LABELS = {
@@ -42,7 +58,7 @@ export const DEFAULT_CONFIG = {
     FLOOR_NEAR_PATH: 0.55,
     PATH_NEAR_FLOOR: 0.45,
   },
-  tileHeight: { 1: 0.2, 2: 1.5, 3: 0.2 },
+  tileHeight: { 1: 0.2, 2: 1.5, 3: 0.2, 10: 0.2, 11: 0.2, 12: 0.2, 13: 0.2 },
 };
 
 // ── Pure utilities ─────────────────────────────────────────────────────────────

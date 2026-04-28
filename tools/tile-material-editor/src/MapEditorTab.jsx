@@ -1,6 +1,10 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { P, TILE_TYPES, TILE_LABELS, deepClone, pickTileColor, drawIsoTile, btnStyle } from './constants';
 import { gridToScreen, screenToGrid, gridToWorld, worldToGrid } from './isoUtils';
+import {
+  TERRAIN_TYPES, TERRAIN_LABELS, TERRAIN_PREVIEW,
+  isTerrainTile, drawTerrainTile,
+} from './autotile';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TW             = 64;
@@ -121,7 +125,10 @@ function applyBrush(tiles, row, col, tileType, brushSize) {
 //    6. Entity markers     (screen space — constant pixel size)
 
 function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntityId, editorMode, overlayOpts) {
-  const { refImage = null, refOpacity = 0.4, refVisible = false, showGrid = false } = overlayOpts ?? {};
+  const {
+    refImage = null, refOpacity = 0.4, refVisible = false,
+    showGrid = false, debugMode = false,
+  } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
   const H   = canvas.height;
@@ -156,9 +163,15 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
 
   // ── 1. Tiles ─────────────────────────────────────────────────────────────────
   for (const [r, c] of cells) {
-    const type       = tiles[r][c];
+    const type = tiles[r][c];
     const { x: sx, y: sy } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
-    drawIsoTile(ctx, sx, sy, TW, TH, pickTileColor(type, r, c, tiles, config), type, config);
+    if (isTerrainTile(type)) {
+      // Terrain tiles: procedural autotile rendering with edge blending
+      drawTerrainTile(ctx, sx, sy, TW, TH, type, r, c, tiles, debugMode);
+    } else {
+      // Legacy game tiles: existing flat-color renderer
+      drawIsoTile(ctx, sx, sy, TW, TH, pickTileColor(type, r, c, tiles, config), type, config);
+    }
   }
 
   // ── 2. Reference image overlay ────────────────────────────────────────────────
@@ -337,6 +350,7 @@ export default function MapEditorTab({ config }) {
 
   // ── Overlay / view ───────────────────────────────────────────────────────────
   const [showGrid,   setShowGrid]   = useState(false);
+  const [debugMode,  setDebugMode]  = useState(false); // raw flat-color view
   const [refImage,   setRefImage]   = useState(null);  // HTMLImageElement | null
   const [refOpacity, setRefOpacity] = useState(0.4);
   const [refVisible, setRefVisible] = useState(true);
@@ -397,10 +411,10 @@ export default function MapEditorTab({ config }) {
     drawMapCanvas(
       canvas, zone, hoveredTile, camera, config,
       selectedEntityId, editorMode,
-      { refImage, refOpacity, refVisible, showGrid },
+      { refImage, refOpacity, refVisible, showGrid, debugMode },
     );
   }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
-      refImage, refOpacity, refVisible, showGrid]);
+      refImage, refOpacity, refVisible, showGrid, debugMode]);
 
   // ── Center camera on new map ──────────────────────────────────────────────────
   useEffect(() => {
@@ -951,12 +965,12 @@ export default function MapEditorTab({ config }) {
                 </div>
               </Section>
 
-              {/* Tile palette */}
-              <Section title="TILE PALETTE">
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                  {tileTypeEntries.map(([key, typeId]) => {
-                    const active = selectedTileType === typeId;
-                    const swatch = config.pal[typeId]?.[0] ?? '#808080';
+              {/* Terrain palette (primary) */}
+              <Section title="TERRAIN">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {Object.entries(TERRAIN_TYPES).map(([key, typeId]) => {
+                    const active  = selectedTileType === typeId;
+                    const preview = TERRAIN_PREVIEW[typeId];
                     return (
                       <button key={key} onClick={() => setSelectedTileType(typeId)} style={{
                         display: 'flex', alignItems: 'center', gap: 10,
@@ -964,9 +978,45 @@ export default function MapEditorTab({ config }) {
                         border: `1px solid ${active ? P.accent : P.border}`,
                         padding: '7px 10px', cursor: 'pointer', width: '100%',
                       }}>
+                        {/* Two-tone swatch: shows base + slight variation */}
                         <span style={{
-                          width: 16, height: 16, background: swatch,
-                          border: `1px solid ${P.border}`, flexShrink: 0,
+                          width: 20, height: 14, flexShrink: 0, borderRadius: 2,
+                          border: `1px solid ${P.border}`,
+                          background: `linear-gradient(135deg, ${preview} 50%, ${preview}cc 50%)`,
+                        }} />
+                        <span style={{
+                          fontFamily: 'monospace', fontSize: 10,
+                          color: active ? P.accent : P.text, letterSpacing: 2,
+                        }}>
+                          {TERRAIN_LABELS[typeId].toUpperCase()}
+                        </span>
+                        {active && (
+                          <span style={{ marginLeft: 'auto', fontSize: 9, color: P.accent }}>
+                            ACTIVE
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Section>
+
+              {/* Legacy game tile palette (secondary) */}
+              <Section title="LEGACY TILES">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {[TILE_TYPES.FLOOR, TILE_TYPES.WALL, TILE_TYPES.ROAD].map(typeId => {
+                    const active = selectedTileType === typeId;
+                    const swatch = config.pal[typeId]?.[0] ?? '#808080';
+                    return (
+                      <button key={typeId} onClick={() => setSelectedTileType(typeId)} style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        padding: '6px 10px', cursor: 'pointer', width: '100%',
+                      }}>
+                        <span style={{
+                          width: 20, height: 14, flexShrink: 0, borderRadius: 2,
+                          background: swatch, border: `1px solid ${P.border}`,
                         }} />
                         <span style={{
                           fontFamily: 'monospace', fontSize: 10,
@@ -1203,6 +1253,17 @@ export default function MapEditorTab({ config }) {
               }}
             >
               GRID
+            </button>
+            <button
+              onClick={() => setDebugMode(d => !d)}
+              title="Toggle raw tile view (no blending)"
+              style={{
+                ...toolbarBtnStyle,
+                color:  debugMode ? P.warn : P.muted,
+                border: `1px solid ${debugMode ? P.warn : P.border}`,
+              }}
+            >
+              {debugMode ? 'RAW' : 'BLEND'}
             </button>
             <button
               onClick={handleScreenshot}
