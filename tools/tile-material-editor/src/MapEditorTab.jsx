@@ -276,6 +276,27 @@ function drawShadowQuadrant(ctx, sx, sy, TW, TH, dir, opacity) {
 //    7. Hover diamond
 //    8. Entity markers (NPC/enemy/spawn)
 
+// ── Sorted cell list (painter's algorithm order) ──────────────────────────────
+// Height-aware painter's algorithm sort:
+// tiles at the same (r+c) diagonal are ordered by elevation (lower first)
+// so taller tiles always paint over shorter tiles on the same diagonal.
+// Call once when tiles/heights change; reuse the result every frame.
+function computeSortedCells(tiles, heights) {
+  const rows = tiles.length;
+  const cols = tiles[0]?.length ?? 0;
+  const cells = [];
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++)
+      if (tiles[r][c] !== 0) cells.push([r, c]);
+  cells.sort((a, b) => {
+    const ha = getH(heights, a[0], a[1]);
+    const hb = getH(heights, b[0], b[1]);
+    return (a[0] + a[1]) * (MAX_HEIGHT + 1) + ha
+         - (b[0] + b[1]) * (MAX_HEIGHT + 1) - hb;
+  });
+  return cells;
+}
+
 function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntityId, editorMode, overlayOpts) {
   const {
     refImage = null, refOpacity = 0.4, refVisible = false,
@@ -300,6 +321,8 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     selectedLightId = null, showLightMarkers = false,
     // Tile variation
     tileVariation = true,
+    // Pre-sorted cell list (avoids O(n log n) sort every frame)
+    sortedCells = null,
   } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
@@ -328,19 +351,9 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   let _tilesRendered = 0;
   let _propsRendered = 0;
 
-  // Height-aware painter's algorithm sort:
-  // tiles at the same (r+c) diagonal are ordered by elevation (lower first)
-  // so taller tiles always paint over shorter tiles on the same diagonal.
-  const cells = [];
-  for (let r = 0; r < rows; r++)
-    for (let c = 0; c < cols; c++)
-      if (tiles[r][c] !== 0) cells.push([r, c]);
-  cells.sort((a, b) => {
-    const ha = getH(heights, a[0], a[1]);
-    const hb = getH(heights, b[0], b[1]);
-    return (a[0] + a[1]) * (MAX_HEIGHT + 1) + ha
-         - (b[0] + b[1]) * (MAX_HEIGHT + 1) - hb;
-  });
+  // Use pre-sorted list when available (cached by useEffect); fall back to
+  // computing it here (e.g. first frame before the effect fires).
+  const cells = sortedCells ?? computeSortedCells(tiles, heights);
 
   ctx.save();
   ctx.setTransform(zoom, 0, 0, zoom, panX, panY);
@@ -348,12 +361,26 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   // ── 1. Tiles ─────────────────────────────────────────────────────────────────
   const splashList = []; // collected during tile loop, drawn in pass 3
 
+  // Viewport cull constants (screen-space, computed once per frame)
+  const _cullHalfW = (TW / 2) * zoom;                          // tile half-width in px
+  const _cullMaxH  = (TH + MAX_HEIGHT * HEIGHT_SCALE) * zoom;  // max tile body height in px
+  const _cullPad   = 100;                                       // extra margin around viewport
+
   for (const [r, c] of cells) {
-    _tilesRendered++;
     const type   = tiles[r][c];
     const h      = getH(heights, r, c);
     const { x: sx, y: syBase } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
     const sy     = syBase - h * HEIGHT_SCALE;
+
+    // ── Viewport cull — skip tiles completely outside the canvas ────────────
+    const screenX = sx  * zoom + panX;
+    const screenY = sy  * zoom + panY;
+    if (screenX + _cullHalfW  < -_cullPad || screenX - _cullHalfW  > W + _cullPad ||
+        screenY + _cullMaxH   < -_cullPad || screenY               > H + _cullPad) {
+      continue;
+    }
+
+    _tilesRendered++;
     const cliffR = Math.max(0, h - getH(heights, r,     c + 1)) * HEIGHT_SCALE;
     const cliffL = Math.max(0, h - getH(heights, r + 1, c    )) * HEIGHT_SCALE;
 
@@ -1069,6 +1096,7 @@ export default function MapEditorTab({ config }) {
   const drawOptsRef          = useRef(null); // latest draw params for RAF loop
   const frameLightsRef       = useRef([]);  // rebuilt only when zone.props/lights change
   const hasWaterRef          = useRef(false); // cached — avoid per-frame tile scan
+  const sortedCellsRef       = useRef([]);  // pre-sorted painter's order — rebuilt on tiles/heights change
   const perfRef              = useRef({ fps: 0, frameTime: 0, tiles: 0, props: 0, lights: 0, slow: false });
   const perfOverlayRef       = useRef(null);
   const fpsHistoryRef        = useRef([]);
@@ -1223,6 +1251,7 @@ export default function MapEditorTab({ config }) {
               cutawayTransition: trans,
               playerScreenY,
               interiorTiles:     interiorTilesRef.current,
+              sortedCells:       sortedCellsRef.current,
             },
           );
           const frameTime = performance.now() - drawStart;
@@ -1257,6 +1286,12 @@ export default function MapEditorTab({ config }) {
   useEffect(() => {
     hasWaterRef.current = zone?.tiles?.some(row => row.some(t => t === WATER_TYPE)) ?? false;
   }, [zone?.tiles]);
+
+  // ── Cache painter's-order sorted cell list (avoid O(n log n) sort per frame) ─
+  useEffect(() => {
+    if (!zone?.tiles) { sortedCellsRef.current = []; return; }
+    sortedCellsRef.current = computeSortedCells(zone.tiles, zone.heights);
+  }, [zone?.tiles, zone?.heights]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Cache frameLights (rebuild only when props/lights change, not every RAF tick)
   useEffect(() => {
@@ -1345,6 +1380,8 @@ export default function MapEditorTab({ config }) {
         showLightMarkers: editorMode === 'lighting' || showLightMarkers,
         // Tile variation
         tileVariation,
+        // Pre-sorted cells (cached by useEffect)
+        sortedCells: sortedCellsRef.current,
       },
     );
   }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
