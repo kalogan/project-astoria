@@ -3,9 +3,9 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  base: './',           // relative asset paths — works from any serving location
+  base: '/tools/tile-editor/',
   build: {
-    outDir: '../tile-editor',   // output to tools/tile-editor/ (committed, served directly)
+    outDir: '../../client/tools/tile-editor',
     emptyOutDir: true,
   },
 });
