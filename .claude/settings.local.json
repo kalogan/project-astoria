@@ -12,7 +12,9 @@
       "Bash(where vercel *)",
       "Bash(npx vercel *)",
       "Bash(vercel --prod)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(node scripts/copy-client.js)"
     ]
   }
 }

@@ -1,11 +1,5 @@
 {
   "name": "project-astoria",
   "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "npm run build:client && npm run build:tools",
-    "build:client": "node scripts/copy-client.js",
-    "build:tools": "cd tools/tile-material-editor && npm install && npm run build"
-  }
+  "private": true
 }

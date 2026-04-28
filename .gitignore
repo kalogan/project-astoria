@@ -1,4 +1,3 @@
 .vercel
-dist/
 node_modules/
 tools/tile-material-editor/node_modules/
