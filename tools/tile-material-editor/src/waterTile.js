@@ -237,12 +237,13 @@ function _drawFoamSpeckle(ctx, sx, sy, TW, TH, hasShore, row, col) {
  * @param {number[][]}  tiles       full zone tile grid
  * @param {number[][]|null} heights zone.heights for depth
  * @param {string[][]|null} waterFlow zone.waterFlow for river streaks
- * @param {number}      animOffset  0–∞ scrolling phase (time-based, modded in caller)
+ * @param {number}      animOffset  0-inf scrolling phase (time-based, modded in caller)
  * @param {number}      cliffR      right-face cliff extension px (from height system)
  * @param {number}      cliffL      left-face cliff extension px
+ * @param {object|null} waterMod    zone env water modifier { murky, dark, speedMul }
  */
 export function drawWaterTile(ctx, sx, sy, TW, TH, row, col, tiles, heights,
-                               waterFlow, animOffset, cliffR, cliffL) {
+                               waterFlow, animOffset, cliffR, cliffL, waterMod) {
   const hw    = TW * 0.5;
   const hh    = TH * 0.5;
   const depth = getWaterDepth(tiles, row, col, heights);
@@ -257,7 +258,25 @@ export function drawWaterTile(ctx, sx, sy, TW, TH, row, col, tiles, heights,
 
   // Per-tile noise ±10 brightness
   const jitter  = (_hash(row, col, 0) - 0.5) * 20;
-  const baseRgb = rawRgb.map(v => Math.max(0, Math.min(255, Math.round(v + jitter))));
+  let   baseRgb = rawRgb.map(v => Math.max(0, Math.min(255, Math.round(v + jitter))));
+
+  // Zone-environment water modifications
+  if (waterMod?.murky) {
+    // Sewer: push green up, reduce red and blue → murky green-brown tint
+    baseRgb = [
+      Math.max(0, baseRgb[0] - 12),
+      Math.min(255, baseRgb[1] + 20),
+      Math.max(0, baseRgb[2] - 28),
+    ];
+  }
+  if (waterMod?.dark) {
+    // Cave: reduce red and green, push blue up slightly → cold dark water
+    baseRgb = [
+      Math.max(0, baseRgb[0] - 14),
+      Math.max(0, baseRgb[1] - 18),
+      Math.min(255, baseRgb[2] + 12),
+    ];
+  }
 
   const baseH = Math.max(1, Math.round(TH * TERRAIN_FLAT_H));
   const lfH   = baseH + (cliffL ?? 0);
@@ -293,10 +312,11 @@ export function drawWaterTile(ctx, sx, sy, TW, TH, row, col, tiles, heights,
   ctx.fillStyle = _rgb(baseRgb);
   ctx.fill();
 
-  // ── Specular sheen (subtle gradient toward top vertex)
+  // ── Specular sheen (subtle gradient toward top vertex; stronger for cave dark water)
   {
+    const sheenTop = waterMod?.dark ? 0.18 : 0.09;
     const grad = ctx.createLinearGradient(sx, sy, sx, sy + TH);
-    grad.addColorStop(0,    'rgba(255,255,255,0.09)');
+    grad.addColorStop(0,    `rgba(255,255,255,${sheenTop})`);
     grad.addColorStop(0.45, 'rgba(255,255,255,0)');
     ctx.save();
     ctx.beginPath();
@@ -325,9 +345,10 @@ export function drawWaterTile(ctx, sx, sy, TW, TH, row, col, tiles, heights,
     }
   }
 
-  // ── River flow streaks
-  const flow = waterFlow?.[row]?.[col] ?? null;
-  if (flow) _drawFlowStreaks(ctx, sx, sy, TW, TH, flow, row, col, animOffset);
+  // ── River flow streaks (speed scaled by zone waterMod.speedMul)
+  const flow      = waterFlow?.[row]?.[col] ?? null;
+  const speedMul  = waterMod?.speedMul ?? 1.0;
+  if (flow) _drawFlowStreaks(ctx, sx, sy, TW, TH, flow, row, col, animOffset * speedMul);
 
   // ── Foam speckle
   _drawFoamSpeckle(ctx, sx, sy, TW, TH, hasShore, row, col);

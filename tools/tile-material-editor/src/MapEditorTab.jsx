@@ -13,6 +13,14 @@ import {
   WATER_TYPE, drawWaterTile, drawWaterfallFace, drawSplashEffect, isWaterTile,
 } from './waterTile';
 import { drawBridgeSegment, drawDockSegment, DOCK_DIR_DELTAS } from './structureTile';
+import {
+  ZONE_ENV, ZONE_LABELS,
+  ZONE_TILE_IDS, ZONE_TILE_LABELS, ZONE_TILE_PREVIEW,
+  drawVignette, drawEnvTint,
+} from './zoneEnv';
+import { generateCave }   from './caveGen';
+import { generateDungeon } from './dungeonGen';
+import { populateDungeon, ROOM_TYPE_COLORS, ROOM_TYPE_LABELS } from './questGen';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TW             = 64;
@@ -32,7 +40,11 @@ const ENTITY_PALETTE = [
   { type: 'spawn',     subtype: 'player',   label: 'Spawn Point',     color: '#3498db', icon: 'S', defaultConfig: {} },
   { type: 'structure', subtype: 'bridge',   label: 'Bridge',          color: '#a07840', icon: 'B', defaultConfig: { orientation: 'ew', length: '3' } },
   { type: 'structure', subtype: 'dock',     label: 'Dock',            color: '#8b6030', icon: 'D', defaultConfig: { orientation: 'south', length: '3' } },
-  { type: 'structure', subtype: 'pier',     label: 'Pier',            color: '#7a5028', icon: 'P', defaultConfig: { orientation: 'south', length: '5' } },
+  { type: 'structure', subtype: 'pier',       label: 'Pier',            color: '#7a5028', icon: 'P', defaultConfig: { orientation: 'south', length: '5' } },
+  { type: 'transition', subtype: 'ladder_up',   label: 'Ladder Up',       color: '#a89050', icon: 'L', defaultConfig: { targetZone: '' } },
+  { type: 'transition', subtype: 'ladder_down', label: 'Ladder Down',     color: '#806830', icon: 'L', defaultConfig: { targetZone: '' } },
+  { type: 'transition', subtype: 'cave_entrance', label: 'Cave Entrance', color: '#58504a', icon: 'C', defaultConfig: { targetZone: '' } },
+  { type: 'marker',     subtype: 'generic',    label: 'Room Marker',     color: '#9b59b6', icon: 'M', defaultConfig: { label: '', color: '#9b59b6' } },
 ];
 
 // ── Water flow helper ──────────────────────────────────────────────────────────
@@ -203,6 +215,7 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     showGrid = false, debugMode = false,
     heights = null, showHeightDebug = false,
     waterFlow = null, animOffset = 0,
+    waterMod = null, zoneType = 'surface',
   } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
@@ -256,7 +269,7 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
 
     if (isWaterTile(type)) {
       drawWaterTile(ctx, sx, sy, TW, TH, r, c, tiles, heights, waterFlow,
-                    animOffset, cliffR, cliffL);
+                    animOffset, cliffR, cliffL, waterMod);
       // ── Waterfall detection (right face: toward col+1)
       if (c + 1 < cols && isWaterTile(tiles[r][c + 1])) {
         const hR = getH(heights, r, c + 1);
@@ -383,7 +396,31 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     }
   }
 
+  // ── 4. Zone environment tint (world-space, on top of all tiles) ───────────────
+  {
+    const envCfg = ZONE_ENV[zoneType];
+    if (envCfg?.tileTint) {
+      const corners = [
+        gridToScreen(0,      0,      ISO_ORIGIN, TW, TH),
+        gridToScreen(0,      cols-1, ISO_ORIGIN, TW, TH),
+        gridToScreen(rows-1, 0,      ISO_ORIGIN, TW, TH),
+        gridToScreen(rows-1, cols-1, ISO_ORIGIN, TW, TH),
+      ];
+      const minX = Math.min(...corners.map(p => p.x)) - TW;
+      const minY = Math.min(...corners.map(p => p.y)) - TH;
+      const spanW = Math.max(...corners.map(p => p.x)) - minX + TW;
+      const spanH = Math.max(...corners.map(p => p.y)) - minY + TH * 2;
+      drawEnvTint(ctx, envCfg.tileTint, minX, minY, spanW, spanH);
+    }
+  }
+
   ctx.restore();
+
+  // ── 5. Zone vignette (screen-space) ──────────────────────────────────────────
+  {
+    const envCfg = ZONE_ENV[zoneType];
+    if (envCfg?.vignette) drawVignette(ctx, W, H, envCfg.vignette);
+  }
 
   // ── 4. Hover diamond (screen space) ───────────────────────────────────────────
   if (hoveredTile) {
@@ -438,8 +475,34 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     const wy  = wyBase - h * HEIGHT_SCALE;
     const sx  = wx  * zoom + panX;
     const sy  = (wy + TH / 2) * zoom + panY;
-    const def = getEntityDef(entity);
     const isSelected = entity.id === selectedEntityId;
+
+    // Room type markers (from questGen) — render as a color-coded label badge
+    if (entity.type === 'marker') {
+      const color  = entity.config?.color ?? '#9b59b6';
+      const label  = entity.config?.label ?? 'MKR';
+      ctx.save();
+      ctx.globalAlpha = 0.78;
+      ctx.fillStyle   = color;
+      ctx.beginPath();
+      ctx.roundRect?.(sx - 14, sy - 8, 28, 16, 3) ?? ctx.rect(sx - 14, sy - 8, 28, 16);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.font         = 'bold 8px monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, sx, sy);
+      ctx.globalAlpha = 1;
+      if (isSelected) {
+        ctx.strokeStyle = P.accent;
+        ctx.lineWidth   = 1.5;
+        ctx.strokeRect(sx - 15, sy - 9, 30, 18);
+      }
+      ctx.restore();
+      continue;
+    }
+
+    const def = getEntityDef(entity);
 
     if (isSelected) {
       ctx.beginPath();
@@ -523,7 +586,18 @@ export default function MapEditorTab({ config }) {
   const [camera, setCamera] = useState({ panX: 0, panY: 0, zoom: 1 });
 
   // ── Editor mode ──────────────────────────────────────────────────────────────
-  const [editorMode, setEditorMode] = useState('tile'); // 'tile' | 'entity'
+  const [editorMode, setEditorMode] = useState('tile'); // 'tile' | 'height' | 'entity' | 'generate'
+
+  // ── Procedural generation ─────────────────────────────────────────────────────
+  const [genMode, setGenMode] = useState('cave'); // 'cave' | 'dungeon'
+  const [caveParams, setCaveParams] = useState({
+    width: 60, height: 60, fillPercent: 46, smoothSteps: 5,
+    seed: 12345, waterFraction: 8,
+  });
+  const [dungeonParams, setDungeonParams] = useState({
+    width: 60, height: 60, roomCount: 12, minRoomSize: 4,
+    maxRoomSize: 10, seed: 12345,
+  });
 
   // ── Tile mode ────────────────────────────────────────────────────────────────
   const [selectedTileType, setSelectedTileType] = useState(TILE_TYPES.FLOOR);
@@ -591,6 +665,7 @@ export default function MapEditorTab({ config }) {
 
   // ── Keep draw opts mirror current on every render (for RAF loop) ─────────────
   useLayoutEffect(() => {
+    const zoneType = zone?.type ?? 'surface';
     drawOptsRef.current = {
       zone, hoveredTile, camera, config, selectedEntityId, editorMode,
       overlayOpts: {
@@ -598,6 +673,8 @@ export default function MapEditorTab({ config }) {
         heights:        zone?.heights   ?? null,
         showHeightDebug,
         waterFlow:      zone?.waterFlow ?? null,
+        waterMod:       ZONE_ENV[zoneType]?.waterMod ?? null,
+        zoneType,
       },
     };
   }); // no deps — runs after every render
@@ -650,8 +727,9 @@ export default function MapEditorTab({ config }) {
   // The RAF loop handles continuous animation; this ensures immediate response
   // to non-animation state changes (tile paint, entity move, zoom, etc.).
   useEffect(() => {
-    const canvas = canvasRef.current;
+    const canvas  = canvasRef.current;
     if (!canvas) return;
+    const zoneType = zone?.type ?? 'surface';
     drawMapCanvas(
       canvas, zone, hoveredTile, camera, config,
       selectedEntityId, editorMode,
@@ -660,6 +738,8 @@ export default function MapEditorTab({ config }) {
         heights:        zone?.heights   ?? null, showHeightDebug,
         waterFlow:      zone?.waterFlow ?? null,
         animOffset:     animOffsetRef.current,
+        waterMod:       ZONE_ENV[zoneType]?.waterMod ?? null,
+        zoneType,
       },
     );
   }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
@@ -1149,7 +1229,7 @@ export default function MapEditorTab({ config }) {
 
         {/* Mode toggle */}
         <div style={{ display: 'flex', borderBottom: `1px solid ${P.border}`, flexShrink: 0 }}>
-          {[['tile', 'TILE'], ['height', 'HEIGHT'], ['entity', 'ENTITY']].map(([mode, label]) => {
+          {[['tile', 'TILE'], ['height', 'HT'], ['entity', 'ENT'], ['generate', 'GEN']].map(([mode, label]) => {
             const active = editorMode === mode;
             return (
               <button key={mode} onClick={() => switchMode(mode)} style={{
@@ -1226,6 +1306,17 @@ export default function MapEditorTab({ config }) {
                 <input style={inputStyle} type="number"
                   value={zone.config?.seed ?? 0}
                   onChange={e => setConfigField('seed', parseInt(e.target.value) || 0)} />
+              </FieldRow>
+              <FieldRow label="ZONE TYPE">
+                <select
+                  style={selectStyle}
+                  value={zone.type ?? 'surface'}
+                  onChange={e => setMapField('type', e.target.value)}
+                >
+                  {Object.entries(ZONE_LABELS).map(([k, v]) => (
+                    <option key={k} value={k}>{v}</option>
+                  ))}
+                </select>
               </FieldRow>
             </Section>
           )}
@@ -1374,6 +1465,43 @@ export default function MapEditorTab({ config }) {
                 </Section>
               )}
 
+              {/* Zone-specific tile palette */}
+              {zone && ZONE_ENV[zone.type ?? 'surface']?.tilesetIds && (
+                <Section title={`${(zone.type ?? 'surface').toUpperCase()} TILES`}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {(ZONE_ENV[zone.type].tilesetIds ?? []).map(typeId => {
+                      const active  = selectedTileType === typeId;
+                      const preview = ZONE_TILE_PREVIEW[typeId] ?? '#808080';
+                      return (
+                        <button key={typeId} onClick={() => setSelectedTileType(typeId)} style={{
+                          display: 'flex', alignItems: 'center', gap: 10,
+                          background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                          border: `1px solid ${active ? P.accent : P.border}`,
+                          padding: '7px 10px', cursor: 'pointer', width: '100%',
+                        }}>
+                          <span style={{
+                            width: 20, height: 14, flexShrink: 0, borderRadius: 2,
+                            border: `1px solid ${P.border}`,
+                            background: `linear-gradient(135deg, ${preview} 50%, ${preview}cc 50%)`,
+                          }} />
+                          <span style={{
+                            fontFamily: 'monospace', fontSize: 10,
+                            color: active ? P.accent : P.text, letterSpacing: 2,
+                          }}>
+                            {ZONE_TILE_LABELS[typeId]?.toUpperCase() ?? typeId}
+                          </span>
+                          {active && (
+                            <span style={{ marginLeft: 'auto', fontSize: 9, color: P.accent }}>
+                              ACTIVE
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </Section>
+              )}
+
               {/* Legacy game tile palette (secondary) */}
               <Section title="LEGACY TILES">
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1499,6 +1627,37 @@ export default function MapEditorTab({ config }) {
               </Section>
 
               {/* Entity editor panel */}
+              {/* Populate dungeon — only shown when zone has _rooms from dungeonGen */}
+              {zone?._rooms?.length > 0 && (
+                <Section title="DUNGEON POPULATE">
+                  <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                    {zone._rooms.length} typed rooms detected.<br />
+                    Places enemies, bosses, and quest objectives.
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {zone._rooms.map(r => (
+                      <span key={r.id} style={{
+                        fontSize: 8, padding: '2px 6px', borderRadius: 3,
+                        background: ROOM_TYPE_COLORS[r.roomType] ?? '#555',
+                        color: '#fff', fontFamily: 'monospace', letterSpacing: 1,
+                      }}>
+                        {ROOM_TYPE_LABELS[r.roomType] ?? r.roomType}
+                      </span>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => {
+                      commitHistory();
+                      setZone(prev => prev ? populateDungeon(prev) : prev);
+                      setIsDirty(true);
+                    }}
+                    style={{ ...btnStyle(P.accent), width: '100%' }}
+                  >
+                    POPULATE DUNGEON
+                  </button>
+                </Section>
+              )}
+
               {selectedEntity && (
                 <Section title="ENTITY EDITOR">
                   <FieldRow label="TYPE">
@@ -1570,6 +1729,110 @@ export default function MapEditorTab({ config }) {
                   >
                     DELETE ENTITY
                   </button>
+                </Section>
+              )}
+            </>
+          )}
+
+          {/* ── GENERATE MODE ────────────────────────────────────────────────── */}
+          {editorMode === 'generate' && (
+            <>
+              <Section title="GENERATOR">
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {[['cave', 'CAVE'], ['dungeon', 'DUNGEON']].map(([id, label]) => {
+                    const active = genMode === id;
+                    return (
+                      <button key={id} onClick={() => setGenMode(id)} style={{
+                        flex: 1,
+                        background: active ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        color: active ? P.accent : P.muted,
+                        fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
+                        padding: '6px 4px', cursor: 'pointer',
+                      }}>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Section>
+
+              {genMode === 'cave' && (
+                <Section title="CAVE PARAMS">
+                  {[
+                    ['width',         'W',       'number', 20, 200],
+                    ['height',        'H',       'number', 20, 200],
+                    ['fillPercent',   'FILL %',  'number',  0, 100],
+                    ['smoothSteps',   'SMOOTH',  'number',  1,  12],
+                    ['seed',          'SEED',    'number',  0, 999999],
+                    ['waterFraction', 'WATER %', 'number',  0, 100],
+                  ].map(([field, label]) => (
+                    <FieldRow key={field} label={label} labelWidth={60}>
+                      <input
+                        style={{ ...inputStyle, width: '100%' }}
+                        type="number"
+                        value={caveParams[field]}
+                        onChange={e => setCaveParams(p => ({ ...p, [field]: parseInt(e.target.value) || 0 }))}
+                      />
+                    </FieldRow>
+                  ))}
+                  <button
+                    onClick={() => {
+                      const generated = generateCave({
+                        ...caveParams,
+                        waterFraction: caveParams.waterFraction / 100,
+                      });
+                      setZone(generated);
+                      setCurrentMapId(generated.id);
+                      setIsDirty(true);
+                      clearHistory();
+                    }}
+                    style={{ ...btnStyle(P.accent), width: '100%' }}
+                  >
+                    GENERATE CAVE
+                  </button>
+                  <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                    Cellular automata · Rock autotile<br />
+                    Largest connected region kept
+                  </div>
+                </Section>
+              )}
+
+              {genMode === 'dungeon' && (
+                <Section title="DUNGEON PARAMS">
+                  {[
+                    ['width',       'W',      'number', 20, 200],
+                    ['height',      'H',      'number', 20, 200],
+                    ['roomCount',   'ROOMS',  'number',  3,  40],
+                    ['minRoomSize', 'MIN SZ', 'number',  2,  12],
+                    ['maxRoomSize', 'MAX SZ', 'number',  4,  20],
+                    ['seed',        'SEED',   'number',  0, 999999],
+                  ].map(([field, label]) => (
+                    <FieldRow key={field} label={label} labelWidth={60}>
+                      <input
+                        style={{ ...inputStyle, width: '100%' }}
+                        type="number"
+                        value={dungeonParams[field]}
+                        onChange={e => setDungeonParams(p => ({ ...p, [field]: parseInt(e.target.value) || 0 }))}
+                      />
+                    </FieldRow>
+                  ))}
+                  <button
+                    onClick={() => {
+                      const generated = generateDungeon(dungeonParams);
+                      setZone(generated);
+                      setCurrentMapId(generated.id);
+                      setIsDirty(true);
+                      clearHistory();
+                    }}
+                    style={{ ...btnStyle(P.accent), width: '100%' }}
+                  >
+                    GENERATE DUNGEON
+                  </button>
+                  <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                    Room-and-corridor · MST connected<br />
+                    Switch to ENTITY tab to populate
+                  </div>
                 </Section>
               )}
             </>

@@ -10,34 +10,58 @@
 //   4. Noise speckle — tiny scattered light/dark dots for texture
 
 // ── Terrain type IDs ──────────────────────────────────────────────────────────
+// IDs 10–13: standard surface terrain
+// IDs 15–20: zone-specific terrain (sewer: 15-17, cave: 18-20)
+// ID    14:  water (handled by waterTile.js — not a terrain tile)
 
 export const TERRAIN_TYPES = {
-  GRASS: 10,
-  DIRT:  11,
-  PATH:  12,
-  STONE: 13,
+  GRASS:   10,
+  DIRT:    11,
+  PATH:    12,
+  STONE:   13,
+  // Sewer
+  BRICK:   15,
+  SLUDGE:  16,
+  GRATE:   17,
+  // Cave
+  ROCK:    18,
+  MOSS:    19,
+  CRYSTAL: 20,
 };
 
 export const TERRAIN_LABELS = {
-  [TERRAIN_TYPES.GRASS]: 'Grass',
-  [TERRAIN_TYPES.DIRT]:  'Dirt',
-  [TERRAIN_TYPES.PATH]:  'Path',
-  [TERRAIN_TYPES.STONE]: 'Stone',
+  [TERRAIN_TYPES.GRASS]:   'Grass',
+  [TERRAIN_TYPES.DIRT]:    'Dirt',
+  [TERRAIN_TYPES.PATH]:    'Path',
+  [TERRAIN_TYPES.STONE]:   'Stone',
+  [TERRAIN_TYPES.BRICK]:   'Brick',
+  [TERRAIN_TYPES.SLUDGE]:  'Sludge',
+  [TERRAIN_TYPES.GRATE]:   'Grate',
+  [TERRAIN_TYPES.ROCK]:    'Rock',
+  [TERRAIN_TYPES.MOSS]:    'Moss',
+  [TERRAIN_TYPES.CRYSTAL]: 'Crystal',
 };
 
 // Representative single color used in the editor palette swatch
 export const TERRAIN_PREVIEW = {
-  [TERRAIN_TYPES.GRASS]: '#5a8e3a',
-  [TERRAIN_TYPES.DIRT]:  '#8b6340',
-  [TERRAIN_TYPES.PATH]:  '#9a8060',
-  [TERRAIN_TYPES.STONE]: '#6a7070',
+  [TERRAIN_TYPES.GRASS]:   '#5a8e3a',
+  [TERRAIN_TYPES.DIRT]:    '#8b6340',
+  [TERRAIN_TYPES.PATH]:    '#9a8060',
+  [TERRAIN_TYPES.STONE]:   '#6a7070',
+  [TERRAIN_TYPES.BRICK]:   '#6e3d2a',
+  [TERRAIN_TYPES.SLUDGE]:  '#445828',
+  [TERRAIN_TYPES.GRATE]:   '#404044',
+  [TERRAIN_TYPES.ROCK]:    '#363432',
+  [TERRAIN_TYPES.MOSS]:    '#304820',
+  [TERRAIN_TYPES.CRYSTAL]: '#505890',
 };
 
 // Flat height used for all terrain tiles (matches tileHeight of 0.2 floor tiles)
 const TERRAIN_FLAT_H_RATIO = 0.22;
 
 export function isTerrainTile(typeId) {
-  return typeId >= 10 && typeId <= 13;
+  // IDs 10-13 (standard) + 15-20 (zone-specific); 14 is water, handled separately
+  return (typeId >= 10 && typeId <= 13) || (typeId >= 15 && typeId <= 20);
 }
 
 // ── Color palettes ────────────────────────────────────────────────────────────
@@ -46,41 +70,51 @@ export function isTerrainTile(typeId) {
 
 const TERRAIN_PALETTES = {
   [TERRAIN_TYPES.GRASS]: [
-    [90,  142, 58],
-    [85,  135, 54],
-    [96,  148, 63],
-    [88,  139, 56],
-    [93,  144, 61],
+    [90,  142, 58],  [85, 135, 54],  [96, 148, 63],  [88, 139, 56],  [93, 144, 61],
   ],
   [TERRAIN_TYPES.DIRT]: [
-    [140, 100, 65],
-    [133,  95, 59],
-    [147, 105, 70],
-    [137,  98, 63],
-    [143, 103, 67],
+    [140, 100, 65], [133,  95, 59], [147, 105, 70], [137,  98, 63], [143, 103, 67],
   ],
   [TERRAIN_TYPES.PATH]: [
-    [155, 130, 98],
-    [148, 123, 91],
-    [162, 137, 105],
-    [152, 127, 95],
-    [158, 133, 101],
+    [155, 130, 98], [148, 123, 91], [162, 137, 105], [152, 127, 95], [158, 133, 101],
   ],
   [TERRAIN_TYPES.STONE]: [
-    [108, 114, 114],
-    [101, 107, 107],
-    [115, 121, 121],
-    [104, 110, 110],
-    [111, 117, 117],
+    [108, 114, 114], [101, 107, 107], [115, 121, 121], [104, 110, 110], [111, 117, 117],
+  ],
+  // ── Sewer tiles ──────────────────────────────────────────────────────────────
+  [TERRAIN_TYPES.BRICK]: [
+    [108, 60, 40],  [102, 55, 36],  [114, 65, 44],  [106, 58, 38],  [110, 62, 42],
+  ],
+  [TERRAIN_TYPES.SLUDGE]: [
+    [66,  80, 44],  [62,  76, 40],  [70,  84, 48],  [64,  78, 42],  [68,  82, 46],
+  ],
+  [TERRAIN_TYPES.GRATE]: [
+    [54,  54, 57],  [48,  48, 51],  [60,  60, 63],  [51,  51, 54],  [56,  56, 59],
+  ],
+  // ── Cave tiles ───────────────────────────────────────────────────────────────
+  [TERRAIN_TYPES.ROCK]: [
+    [50,  48, 46],  [45,  43, 41],  [55,  53, 51],  [47,  45, 43],  [52,  50, 48],
+  ],
+  [TERRAIN_TYPES.MOSS]: [
+    [46,  66, 34],  [42,  62, 30],  [50,  70, 38],  [44,  64, 32],  [48,  68, 36],
+  ],
+  [TERRAIN_TYPES.CRYSTAL]: [
+    [78,  88, 146], [73,  83, 140], [83,  93, 152], [76,  86, 143], [80,  90, 148],
   ],
 };
 
 // Debug-mode flat colors (one per type, no noise)
 const TERRAIN_DEBUG_COLORS = {
-  [TERRAIN_TYPES.GRASS]: 'rgb(90,142,58)',
-  [TERRAIN_TYPES.DIRT]:  'rgb(140,100,65)',
-  [TERRAIN_TYPES.PATH]:  'rgb(155,130,98)',
-  [TERRAIN_TYPES.STONE]: 'rgb(108,114,114)',
+  [TERRAIN_TYPES.GRASS]:   'rgb(90,142,58)',
+  [TERRAIN_TYPES.DIRT]:    'rgb(140,100,65)',
+  [TERRAIN_TYPES.PATH]:    'rgb(155,130,98)',
+  [TERRAIN_TYPES.STONE]:   'rgb(108,114,114)',
+  [TERRAIN_TYPES.BRICK]:   'rgb(108,60,40)',
+  [TERRAIN_TYPES.SLUDGE]:  'rgb(66,80,44)',
+  [TERRAIN_TYPES.GRATE]:   'rgb(54,54,57)',
+  [TERRAIN_TYPES.ROCK]:    'rgb(50,48,46)',
+  [TERRAIN_TYPES.MOSS]:    'rgb(46,66,34)',
+  [TERRAIN_TYPES.CRYSTAL]: 'rgb(78,88,146)',
 };
 
 // ── Blend colors ──────────────────────────────────────────────────────────────
@@ -88,12 +122,25 @@ const TERRAIN_DEBUG_COLORS = {
 // Key format: `${lowerTypeId}_${higherTypeId}`.
 
 const BLEND_COLORS = {
+  // Standard terrain pairs
   '10_11': [122, 120,  64],  // grass ↔ dirt
   '10_12': [136, 138,  80],  // grass ↔ path
   '10_13': [ 98, 112,  96],  // grass ↔ stone
   '11_12': [144, 113,  80],  // dirt  ↔ path
   '11_13': [118, 112,  96],  // dirt  ↔ stone
   '12_13': [134, 128, 112],  // path  ↔ stone
+  // Sewer pairs
+  '15_16': [ 86,  68,  42],  // brick  ↔ sludge
+  '15_17': [ 78,  56,  48],  // brick  ↔ grate
+  '16_17': [ 60,  66,  50],  // sludge ↔ grate
+  // Cave pairs
+  '18_19': [ 48,  60,  40],  // rock ↔ moss
+  '18_20': [ 64,  70,  96],  // rock ↔ crystal
+  '19_20': [ 62,  78,  92],  // moss ↔ crystal
+  // Cross-set transitions (used when different zone tiles share edges)
+  '13_18': [ 52,  52,  50],  // stone ↔ rock
+  '11_15': [122,  78,  52],  // dirt  ↔ brick
+  '12_16': [108, 106,  70],  // path  ↔ sludge
 };
 
 function _blendRgb(typeA, typeB) {
