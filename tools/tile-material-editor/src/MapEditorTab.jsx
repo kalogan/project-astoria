@@ -321,7 +321,12 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   const { panX, panY, zoom } = camera;
   const { tiles }            = zone;
   const rows                 = tiles.length;
-  const cols                 = tiles[0].length;
+  const cols                 = tiles[0]?.length ?? 0;
+  if (!rows || !cols) return { tilesRendered: 0, propsRendered: 0, lightsRendered: 0 };
+
+  // Perf counters
+  let _tilesRendered = 0;
+  let _propsRendered = 0;
 
   // Height-aware painter's algorithm sort:
   // tiles at the same (r+c) diagonal are ordered by elevation (lower first)
@@ -344,6 +349,7 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   const splashList = []; // collected during tile loop, drawn in pass 3
 
   for (const [r, c] of cells) {
+    _tilesRendered++;
     const type   = tiles[r][c];
     const h      = getH(heights, r, c);
     const { x: sx, y: syBase } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
@@ -506,6 +512,7 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   if (showProps && props?.length) {
     const sorted = [...props].sort((a, b) => propSortKey(a) - propSortKey(b));
     for (const prop of sorted) {
+      _propsRendered++;
       const h = getH(heights, prop.y, prop.x);
       const { x: sx, y: syBase } = gridToScreen(prop.y, prop.x, ISO_ORIGIN, TW, TH);
       const sy  = syBase - h * HEIGHT_SCALE;
@@ -864,6 +871,12 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     }
     ctx.restore();
   }
+
+  return {
+    tilesRendered:  _tilesRendered,
+    propsRendered:  _propsRendered,
+    lightsRendered: (lights ?? []).length,
+  };
 }
 
 // ── Local UI helpers ──────────────────────────────────────────────────────────
@@ -973,6 +986,9 @@ export default function MapEditorTab({ config }) {
   // ── Loot popup ────────────────────────────────────────────────────────────────
   const [lootPopup, setLootPopup] = useState(null); // { entityId, title, lines[] }
 
+  // ── Performance debug ─────────────────────────────────────────────────────────
+  const [perfDebug, setPerfDebug] = useState(false);
+
   // ── Lighting authoring ────────────────────────────────────────────────────────
   const [activeLightType,   setActiveLightType]   = useState('torch');
   const [selectedLightId,   setSelectedLightId]   = useState(null);
@@ -1051,7 +1067,12 @@ export default function MapEditorTab({ config }) {
   const animOffsetRef        = useRef(0);   // ever-increasing time for water animation
   const animRafRef           = useRef(null);
   const drawOptsRef          = useRef(null); // latest draw params for RAF loop
-  const frameLightsRef       = useRef([]);  // built each RAF tick, read by draw calls
+  const frameLightsRef       = useRef([]);  // rebuilt only when zone.props/lights change
+  const hasWaterRef          = useRef(false); // cached — avoid per-frame tile scan
+  const perfRef              = useRef({ fps: 0, frameTime: 0, tiles: 0, props: 0, lights: 0, slow: false });
+  const perfOverlayRef       = useRef(null);
+  const fpsHistoryRef        = useRef([]);
+  const perfDebugRef         = useRef(false);
 
   useEffect(() => { cameraRef.current            = camera; },           [camera]);
   useEffect(() => { zoneRef.current              = zone; },             [zone]);
@@ -1065,6 +1086,7 @@ export default function MapEditorTab({ config }) {
   useEffect(() => { selectedFlowDirRef.current   = selectedFlowDir; },  [selectedFlowDir]);
   useEffect(() => { enableLightingRef.current      = enableLighting; },    [enableLighting]);
   useEffect(() => { enableCutawayRef.current       = enableCutaway; },     [enableCutaway]);
+  useEffect(() => { perfDebugRef.current           = perfDebug; },         [perfDebug]);
 
   // Stable refs for new fields
   const activeLightTypeRef  = useRef(activeLightType);
@@ -1139,22 +1161,25 @@ export default function MapEditorTab({ config }) {
     let lastTime = performance.now();
 
     const tick = (now) => {
-      const dt  = Math.min((now - lastTime) / 1000, 0.05);
-      lastTime  = now;
-
-      const z        = zoneRef.current;
-      const hasWater = z?.tiles?.some(row => row.some(t => t === WATER_TYPE));
+      const dt      = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime      = now;
       const lighting = enableLightingRef.current;
 
-      // Advance cutaway transition (lerp toward target based on fovOrigin/player pos)
+      // ── FPS tracking (every frame, not just drawing frames) ──────────────────
+      if (perfDebugRef.current && dt > 0) {
+        const hist = fpsHistoryRef.current;
+        hist.push(Math.min(1 / dt, 999));
+        if (hist.length > 60) hist.shift();
+      }
+
+      // ── Advance cutaway transition ────────────────────────────────────────────
       let cutawayChanged = false;
+      const z = zoneRef.current;
       if (enableCutawayRef.current && z?.tiles) {
-        const fovO = drawOptsRef.current?.overlayOpts?.fovOriginForCutaway;
-        const target = fovO
-          ? computeTransitionFactor(fovO.x, fovO.y, interiorTilesRef.current)
-          : 0;
-        const cur = cutawayTransitionRef.current;
-        const next = cur + (target - cur) * Math.min(1, dt * 4.5);
+        const fovO   = drawOptsRef.current?.overlayOpts?.fovOriginForCutaway;
+        const target = fovO ? computeTransitionFactor(fovO.x, fovO.y, interiorTilesRef.current) : 0;
+        const cur    = cutawayTransitionRef.current;
+        const next   = cur + (target - cur) * Math.min(1, dt * 4.5);
         if (Math.abs(next - cur) > 0.005) {
           cutawayTransitionRef.current = next;
           cutawayChanged = true;
@@ -1164,52 +1189,79 @@ export default function MapEditorTab({ config }) {
         cutawayChanged = true;
       }
 
-      // Tick light flicker
-      if (lighting && z) {
-        const ls = buildFrameLights(z);
-        tickLights(ls, now / 1000);
-        frameLightsRef.current = ls;
-      }
+      // ── Tick light flicker (no rebuild — use cached frameLightsRef) ───────────
+      if (lighting) tickLights(frameLightsRef.current, now / 1000);
 
-      const needRedraw = hasWater || lighting || cutawayChanged;
+      const needRedraw = hasWaterRef.current || lighting || cutawayChanged;
       if (needRedraw) {
         animOffsetRef.current += dt * 0.35;
         const canvas = canvasRef.current;
         const opts   = drawOptsRef.current;
         if (canvas && opts?.zone) {
-          const trans = cutawayTransitionRef.current;
+          const trans  = cutawayTransitionRef.current;
           const bLight = lighting ? getBlendedLightingConfig(trans) : null;
-          // Compute player screen Y for cutaway (world-space)
-          const pFov = opts.overlayOpts?.fovOriginForCutaway;
+          const pFov   = opts.overlayOpts?.fovOriginForCutaway;
           let playerScreenY = 0;
           if (pFov && opts.zone?.tiles) {
             const { x: wx, y: wy } = gridToScreen(pFov.y, pFov.x, ISO_ORIGIN, TW, TH);
             const hh_ = getH(opts.overlayOpts?.heights, pFov.y, pFov.x);
             playerScreenY = (wy - hh_ * HEIGHT_SCALE + TH * 0.5) * opts.camera.zoom + opts.camera.panY;
           }
-          drawMapCanvas(
+
+          const drawStart = performance.now();
+          const metrics   = drawMapCanvas(
             canvas, opts.zone, opts.hoveredTile, opts.camera, opts.config,
             opts.selectedEntityId, opts.editorMode,
             {
               ...opts.overlayOpts,
-              animOffset:       animOffsetRef.current,
-              lights:           lighting ? frameLightsRef.current : [],
-              enableLighting:   lighting,
-              darkAlpha:        bLight?.darkAlpha ?? 0.78,
-              showLightRadius:  opts.overlayOpts?.showLightRadius ?? false,
-              enableCutaway:    enableCutawayRef.current,
+              animOffset:        animOffsetRef.current,
+              lights:            lighting ? frameLightsRef.current : [],
+              enableLighting:    lighting,
+              darkAlpha:         bLight?.darkAlpha ?? 0.78,
+              showLightRadius:   opts.overlayOpts?.showLightRadius ?? false,
+              enableCutaway:     enableCutawayRef.current,
               cutawayTransition: trans,
               playerScreenY,
-              interiorTiles:    interiorTilesRef.current,
+              interiorTiles:     interiorTilesRef.current,
             },
           );
+          const frameTime = performance.now() - drawStart;
+
+          // ── Update perf overlay (direct DOM, no React re-render) ──────────────
+          if (perfDebugRef.current && perfOverlayRef.current) {
+            const hist   = fpsHistoryRef.current;
+            const avgFps = hist.length > 0 ? hist.reduce((a, b) => a + b, 0) / hist.length : 0;
+            const slow   = frameTime > 16;
+            const fpsCol = avgFps < 30 ? '#ff4444' : avgFps < 50 ? '#ffaa00' : '#00ff88';
+            perfOverlayRef.current.innerHTML =
+              `<div style="color:${fpsCol};font-weight:bold">` +
+                `FPS  ${avgFps.toFixed(1)}` +
+              `</div>` +
+              `<div style="color:${slow ? '#ff6644' : '#888'}">` +
+                `DRAW ${frameTime.toFixed(2)} ms${slow ? ' ⚠' : ''}` +
+              `</div>` +
+              `<div style="color:#666">TILES  ${metrics?.tilesRendered ?? '—'}</div>` +
+              `<div style="color:#666">PROPS  ${metrics?.propsRendered ?? '—'}</div>` +
+              `<div style="color:#666">LIGHTS ${metrics?.lightsRendered ?? '—'}</div>`;
+          }
         }
       }
+
       animRafRef.current = requestAnimationFrame(tick);
     };
     animRafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animRafRef.current);
   }, []); // empty — RAF always runs
+
+  // ── Cache hasWater flag (avoid per-frame tile scan) ─────────────────────────
+  useEffect(() => {
+    hasWaterRef.current = zone?.tiles?.some(row => row.some(t => t === WATER_TYPE)) ?? false;
+  }, [zone?.tiles]);
+
+  // ── Cache frameLights (rebuild only when props/lights change, not every RAF tick)
+  useEffect(() => {
+    frameLightsRef.current = zone ? buildFrameLights(zone) : [];
+  }, [zone?.props, zone?.lights]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Recompute interior tiles when zone changes ────────────────────────────────
   useEffect(() => {
@@ -1413,11 +1465,14 @@ export default function MapEditorTab({ config }) {
         // Persist opened state and contents
         setZone(prev => {
           if (!prev) return prev;
-          const next = deepClone(prev);
-          const idx  = next.entities.findIndex(e => e.id === nearest.id);
+          const idx = prev.entities.findIndex(e => e.id === nearest.id);
           if (idx === -1) return prev;
-          next.entities[idx].config = { ...next.entities[idx].config, opened: true, contents };
-          return next;
+          return {
+            ...prev,
+            entities: prev.entities.map((e, i) =>
+              i === idx ? { ...e, config: { ...e.config, opened: true, contents } } : e
+            ),
+          };
         });
         setIsDirty(true);
         setLootPopup({
@@ -1530,12 +1585,12 @@ export default function MapEditorTab({ config }) {
 
   // ── Map config edits ──────────────────────────────────────────────────────────
   const setMapField = useCallback((field, value) => {
-    setZone(prev => { if (!prev) return prev; const next = deepClone(prev); next[field] = value; return next; });
+    setZone(prev => prev ? { ...prev, [field]: value } : prev);
     setIsDirty(true);
   }, []);
 
   const setConfigField = useCallback((field, value) => {
-    setZone(prev => { if (!prev) return prev; const next = deepClone(prev); next.config[field] = value; return next; });
+    setZone(prev => prev ? { ...prev, config: { ...prev.config, [field]: value } } : prev);
     setIsDirty(true);
   }, []);
 
@@ -1623,10 +1678,7 @@ export default function MapEditorTab({ config }) {
     };
     setZone(prev => {
       if (!prev) return prev;
-      const next = deepClone(prev);
-      if (!Array.isArray(next.entities)) next.entities = [];
-      next.entities.push(newEntity);
-      return next;
+      return { ...prev, entities: [...(prev.entities ?? []), newEntity] };
     });
     setSelectedEntityId(id);
     setIsDirty(true);
@@ -1636,9 +1688,7 @@ export default function MapEditorTab({ config }) {
     commitHistory();
     setZone(prev => {
       if (!prev) return prev;
-      const next = deepClone(prev);
-      next.entities = (next.entities ?? []).filter(e => e.id !== id);
-      return next;
+      return { ...prev, entities: (prev.entities ?? []).filter(e => e.id !== id) };
     });
     setSelectedEntityId(null);
     setIsDirty(true);
@@ -1647,11 +1697,12 @@ export default function MapEditorTab({ config }) {
   const updateEntity = useCallback((id, updates) => {
     setZone(prev => {
       if (!prev) return prev;
-      const next = deepClone(prev);
-      const idx  = next.entities.findIndex(e => e.id === id);
+      const idx = prev.entities.findIndex(e => e.id === id);
       if (idx === -1) return prev;
-      next.entities[idx] = { ...next.entities[idx], ...updates };
-      return next;
+      return {
+        ...prev,
+        entities: prev.entities.map((e, i) => i === idx ? { ...e, ...updates } : e),
+      };
     });
     setIsDirty(true);
   }, []);
@@ -1659,14 +1710,14 @@ export default function MapEditorTab({ config }) {
   const updateEntityConfig = useCallback((id, key, value) => {
     setZone(prev => {
       if (!prev) return prev;
-      const next = deepClone(prev);
-      const idx  = next.entities.findIndex(e => e.id === id);
+      const idx = prev.entities.findIndex(e => e.id === id);
       if (idx === -1) return prev;
-      next.entities[idx] = {
-        ...next.entities[idx],
-        config: { ...next.entities[idx].config, [key]: value },
+      return {
+        ...prev,
+        entities: prev.entities.map((e, i) =>
+          i === idx ? { ...e, config: { ...e.config, [key]: value } } : e
+        ),
       };
-      return next;
     });
     setIsDirty(true);
   }, []);
@@ -3490,6 +3541,17 @@ export default function MapEditorTab({ config }) {
               INTERIOR
             </button>
             <button
+              onClick={() => setPerfDebug(v => !v)}
+              title="Toggle performance debug overlay"
+              style={{
+                ...toolbarBtnStyle,
+                color:  perfDebug ? '#00ff88' : P.muted,
+                border: `1px solid ${perfDebug ? '#00ff88' : P.border}`,
+              }}
+            >
+              PERF
+            </button>
+            <button
               onClick={handleScreenshot}
               disabled={!zone}
               title="Export canvas as PNG"
@@ -3528,6 +3590,23 @@ export default function MapEditorTab({ config }) {
           onMouseLeave={handleMouseLeave}
           onContextMenu={e => e.preventDefault()}
         />
+
+        {/* ── Performance debug overlay (content updated by RAF, no re-renders) ── */}
+        {perfDebug && (
+          <div
+            ref={perfOverlayRef}
+            style={{
+              position: 'absolute', top: 48, left: 14,
+              background: 'rgba(0,0,0,0.82)', color: '#aaa',
+              padding: '8px 12px',
+              fontFamily: 'monospace', fontSize: 11,
+              lineHeight: 1.8, pointerEvents: 'none',
+              zIndex: 8, minWidth: 160,
+              borderRadius: 4,
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}
+          />
+        )}
 
         {/* ── Loot popup overlay ────────────────────────────────────────────── */}
         {lootPopup && (
