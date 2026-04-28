@@ -9,6 +9,7 @@ import { TriggerSystem }   from './triggerSystem.js';
 import { setFrustumSize }  from './scene.js';
 import { validateZone }    from './zoneValidator.js';
 import { EntityRegistry }  from './entityRegistry.js';
+import { EntityFactory }   from './entityFactory.js';
 import { saveZoneState, loadZoneState, clearZoneState } from './saveSystem.js';
 import { createRNG }        from './rng.js';
 import { generateZone }                         from './zoneGenerator.js';
@@ -128,8 +129,8 @@ export class ZoneManager {
       console.log(`[Zone] Props placed: ${zone.props.length}`);
     }
 
-    // Player spawn
-    const spawn = spawnPos ?? zone.playerStart ?? { x: 0, z: 0 };
+    // Player spawn — editor spawn entity overrides zone.playerStart
+    const spawn = spawnPos ?? rt.spawnOverride ?? zone.playerStart ?? { x: 0, z: 0 };
     this.player.mesh.position.set(spawn.x, 0.65, spawn.z);
 
     // ── Create + register all entities ──────────────────────────
@@ -324,6 +325,7 @@ export class ZoneManager {
     for (const e of zone.entities) entityMap[e.id] = e;
     const sys = zone.systems;
 
+    // ── Keys and doors (systems-referenced entities) ──────────────────────
     const entities = [
       ...(sys.keys  ?? []).map(k => ({
         type: 'key', id: k.entityId, keyId: k.keyId,
@@ -339,7 +341,9 @@ export class ZoneManager {
       })),
     ];
 
-    const enemies = (sys.enemies ?? []).map(en => ({
+    // ── Enemies ───────────────────────────────────────────────────────────
+    // Legacy path: zone.systems.enemies holds stat overrides + entityId refs
+    const legacyEnemies = (sys.enemies ?? []).map(en => ({
       id:           en.entityId,
       x:            entityMap[en.entityId].position.x,
       z:            entityMap[en.entityId].position.y,
@@ -352,6 +356,16 @@ export class ZoneManager {
       xpValue:      en.xpValue,
     }));
 
+    // Editor path: zone.entities entries with type === 'enemy' (no systems entry)
+    // EntityFactory resolves subtype → full stat profile with level scaling.
+    const legacyEnemyIds = new Set((sys.enemies ?? []).map(en => en.entityId));
+    const editorEnemies = zone.entities
+      .filter(e => e.type === 'enemy' && !legacyEnemyIds.has(e.id))
+      .map(e => EntityFactory.buildEnemyDef(e));
+
+    const enemies = [...legacyEnemies, ...editorEnemies];
+
+    // ── Portals / triggers ────────────────────────────────────────────────
     const triggers = (sys.portals ?? []).map(p => ({
       type:   'area',
       x:      entityMap[p.entityId].position.x,
@@ -364,20 +378,18 @@ export class ZoneManager {
       spawnZ: p.spawnZ ?? 0,
     }));
 
-    // NPCs — read directly from zone.entities (no systems entry needed)
+    // ── NPCs — read directly from zone.entities via EntityFactory ─────────
+    // EntityFactory normalises facing (string → radians), resolves subtype
+    // color profiles, and wires dialogueId + interactable.
     const npcs = zone.entities
       .filter(e => e.type === 'npc')
-      .map(e => ({
-        type:   'npc',
-        id:     e.id,
-        x:      e.position.x,
-        z:      e.position.y,  // zone schema: y = world z
-        name:   e.name   ?? e.id,
-        color:  e.color  ?? 0xd4a96a,
-        facing: e.facing ?? 0,
-      }));
+      .map(e => EntityFactory.buildNpcDef(e));
 
-    return { grid: zone.tiles, entities: [...entities, ...npcs], enemies, triggers };
+    // ── Spawn override — editor-placed spawn entity wins over zone.playerStart
+    const spawnEntity   = zone.entities.find(e => e.type === 'spawn' && e.subtype === 'player');
+    const spawnOverride = spawnEntity ? EntityFactory.buildSpawnDef(spawnEntity) : null;
+
+    return { grid: zone.tiles, entities: [...entities, ...npcs], enemies, triggers, spawnOverride };
   }
 
   _registerTrigger(def) {

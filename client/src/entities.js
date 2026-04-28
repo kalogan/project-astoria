@@ -44,9 +44,12 @@ export class Door {
 
 export class NPC {
   constructor(scene, def) {
-    this.id   = def.id;
-    this.type = 'npc';
-    this.name = def.name ?? def.id;
+    this.id           = def.id;
+    this.type         = 'npc';
+    this.name         = def.name ?? def.id;
+    this.dialogueId   = def.dialogueId   ?? null;
+    this.interactable = def.interactable ?? false;
+    this.subtype      = def.subtype      ?? null;
 
     const col    = def.color ?? 0xd4a96a;
     const npcMat = new THREE.MeshLambertMaterial({ color: col });

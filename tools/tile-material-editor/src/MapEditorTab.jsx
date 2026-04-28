@@ -2,18 +2,16 @@ import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { P, TILE_TYPES, TILE_LABELS, deepClone, pickTileColor, drawIsoTile, btnStyle } from './constants';
 import { gridToScreen, screenToGrid, gridToWorld, worldToGrid } from './isoUtils';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const TW = 64;
-const TH = 32;
-const ISO_ORIGIN   = { x: 0, y: 0 };
+// ── Constants ──────────────────────────────────────────────────────────────────
+const TW             = 64;
+const TH             = 32;
+const ISO_ORIGIN     = { x: 0, y: 0 };
 const FALLBACK_ZONES = ['Cameron_Start', 'Cameron_Forest', 'zone_01', 'zone_02'];
-const ZOOM_MIN = 0.25;
-const ZOOM_MAX = 4;
+const ZOOM_MIN       = 0.25;
+const ZOOM_MAX       = 4;
+const HISTORY_LIMIT  = 50;
 
 // ── Entity palette ─────────────────────────────────────────────────────────────
-// Each entry defines a placeable entity type.  `defaultConfig` seeds the
-// entity's config object when first placed.
-
 const ENTITY_PALETTE = [
   { type: 'npc',   subtype: 'greeter',  label: 'NPC: Greeter',    color: '#4fc38a', icon: 'N', defaultConfig: { dialogue: 'intro_greeter' } },
   { type: 'npc',   subtype: 'merchant', label: 'NPC: Merchant',   color: '#f5c842', icon: 'N', defaultConfig: { shopId: '' } },
@@ -30,7 +28,6 @@ function getEntityDef(entity) {
 }
 
 // ── Camera helpers ─────────────────────────────────────────────────────────────
-
 function getInitialCamera(zone, canvasW, canvasH) {
   const rows = zone.tiles.length;
   const cols = zone.tiles[0].length;
@@ -53,15 +50,12 @@ function getInitialCamera(zone, canvasW, canvasH) {
 }
 
 // ── Entity hit-test (screen space) ────────────────────────────────────────────
-// Returns the first entity whose marker circle contains (mouseX, mouseY).
-
 function entityHitTest(mouseX, mouseY, zone, camera) {
   if (!zone?.entities?.length) return null;
   const { panX, panY, zoom } = camera;
-  const rows = zone.tiles.length;
-  const cols = zone.tiles[0].length;
-  const HIT_R = 13; // fixed pixel radius — matches the drawn circle
-
+  const rows  = zone.tiles.length;
+  const cols  = zone.tiles[0].length;
+  const HIT_R = 13;
   for (const entity of zone.entities) {
     const grid = worldToGrid(entity.position.x, entity.position.y, rows, cols);
     const { x: wx, y: wy } = gridToScreen(grid.row, grid.col, ISO_ORIGIN, TW, TH);
@@ -72,9 +66,62 @@ function entityHitTest(mouseX, mouseY, zone, camera) {
   return null;
 }
 
-// ── Canvas draw ────────────────────────────────────────────────────────────────
+// ── Flood fill ────────────────────────────────────────────────────────────────
+// Returns a new tile grid or null if nothing would change.
+function floodFill(tiles, startRow, startCol, fillType) {
+  const rows   = tiles.length;
+  const cols   = tiles[0].length;
+  const target = tiles[startRow][startCol];
+  if (target === fillType) return null;
+  const next    = tiles.map(r => [...r]);
+  const stack   = [[startRow, startCol]];
+  const visited = new Set();
+  while (stack.length) {
+    const [r, c] = stack.pop();
+    if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+    const key = r * cols + c;
+    if (visited.has(key)) continue;
+    if (next[r][c] !== target) continue;
+    visited.add(key);
+    next[r][c] = fillType;
+    stack.push([r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]);
+  }
+  return next;
+}
 
-function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntityId, editorMode) {
+// ── Brush application (paint/erase with size) ─────────────────────────────────
+// Returns a new tile grid or null if nothing would change.
+function applyBrush(tiles, row, col, tileType, brushSize) {
+  const rows   = tiles.length;
+  const cols   = tiles[0].length;
+  const radius = Math.floor(brushSize / 2);
+  let   changed = false;
+  const next   = tiles.map(r => [...r]);
+  for (let dr = -radius; dr <= radius; dr++) {
+    for (let dc = -radius; dc <= radius; dc++) {
+      const r = row + dr;
+      const c = col + dc;
+      if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+      if (next[r][c] !== tileType) { next[r][c] = tileType; changed = true; }
+    }
+  }
+  return changed ? next : null;
+}
+
+// ── Canvas draw ───────────────────────────────────────────────────────────────
+//
+//  overlayOpts: { refImage, refOpacity, refVisible, showGrid }
+//
+//  Draw order (back → front):
+//    1. Background fill
+//    2. Tile meshes        (world space)
+//    3. Reference overlay  (world space, above tiles)
+//    4. Grid lines         (world space)
+//    5. Hover diamond      (screen space — constant pixel size)
+//    6. Entity markers     (screen space — constant pixel size)
+
+function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntityId, editorMode, overlayOpts) {
+  const { refImage = null, refOpacity = 0.4, refVisible = false, showGrid = false } = overlayOpts ?? {};
   const ctx = canvas.getContext('2d');
   const W   = canvas.width;
   const H   = canvas.height;
@@ -93,11 +140,11 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   }
 
   const { panX, panY, zoom } = camera;
-  const { tiles } = zone;
-  const rows = tiles.length;
-  const cols = tiles[0].length;
+  const { tiles }            = zone;
+  const rows                 = tiles.length;
+  const cols                 = tiles[0].length;
 
-  // ── Tiles (world space, back-to-front) ──────────────────────────────────────
+  // Sorted cell list for painter's algorithm
   const cells = [];
   for (let r = 0; r < rows; r++)
     for (let c = 0; c < cols; c++)
@@ -106,22 +153,58 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
 
   ctx.save();
   ctx.setTransform(zoom, 0, 0, zoom, panX, panY);
+
+  // ── 1. Tiles ─────────────────────────────────────────────────────────────────
   for (const [r, c] of cells) {
-    const type     = tiles[r][c];
+    const type       = tiles[r][c];
     const { x: sx, y: sy } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
     drawIsoTile(ctx, sx, sy, TW, TH, pickTileColor(type, r, c, tiles, config), type, config);
   }
+
+  // ── 2. Reference image overlay ────────────────────────────────────────────────
+  if (refImage && refVisible) {
+    const corners = [
+      gridToScreen(0,      0,      ISO_ORIGIN, TW, TH),
+      gridToScreen(0,      cols-1, ISO_ORIGIN, TW, TH),
+      gridToScreen(rows-1, 0,      ISO_ORIGIN, TW, TH),
+      gridToScreen(rows-1, cols-1, ISO_ORIGIN, TW, TH),
+    ];
+    const imgX = Math.min(...corners.map(p => p.x)) - TW * 0.5;
+    const imgY = Math.min(...corners.map(p => p.y)) - TH * 0.5;
+    const imgW = Math.max(...corners.map(p => p.x)) - imgX + TW * 0.5;
+    const imgH = Math.max(...corners.map(p => p.y)) - imgY + TH;
+    ctx.globalAlpha = refOpacity;
+    ctx.drawImage(refImage, imgX, imgY, imgW, imgH);
+    ctx.globalAlpha = 1;
+  }
+
+  // ── 3. Grid overlay ───────────────────────────────────────────────────────────
+  if (showGrid) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.13)';
+    ctx.lineWidth   = 1 / zoom; // constant 1 px on screen regardless of zoom
+    for (const [r, c] of cells) {
+      const { x, y } = gridToScreen(r, c, ISO_ORIGIN, TW, TH);
+      ctx.beginPath();
+      ctx.moveTo(x,          y);
+      ctx.lineTo(x + TW / 2, y + TH / 2);
+      ctx.lineTo(x,          y + TH);
+      ctx.lineTo(x - TW / 2, y + TH / 2);
+      ctx.closePath();
+      ctx.stroke();
+    }
+  }
+
   ctx.restore();
 
-  // ── Hover highlight (screen space, constant stroke) ─────────────────────────
+  // ── 4. Hover diamond (screen space) ───────────────────────────────────────────
   if (hoveredTile) {
     const { row, col } = hoveredTile;
     const { x: wx, y: wy } = gridToScreen(row, col, ISO_ORIGIN, TW, TH);
-    const sx  = wx * zoom + panX;
-    const sy  = wy * zoom + panY;
-    const sHW = TW * zoom * 0.5;
-    const sHH = TH * zoom * 0.5;
-    const sTH = TH * zoom;
+    const sx  = wx  * zoom + panX;
+    const sy  = wy  * zoom + panY;
+    const sHW = TW  * zoom * 0.5;
+    const sHH = TH  * zoom * 0.5;
+    const sTH = TH  * zoom;
     ctx.save();
     ctx.beginPath();
     ctx.moveTo(sx,       sy);
@@ -137,9 +220,9 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     ctx.restore();
   }
 
-  // ── Entity markers (screen space) ───────────────────────────────────────────
+  // ── 5. Entity markers (screen space) ──────────────────────────────────────────
   const entities = zone.entities ?? [];
-  if (entities.length === 0) return;
+  if (!entities.length) return;
 
   const MARKER_R = 9;
   ctx.save();
@@ -148,15 +231,13 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
   ctx.font         = 'bold 9px monospace';
 
   for (const entity of entities) {
-    const grid = worldToGrid(entity.position.x, entity.position.y, rows, cols);
+    const grid      = worldToGrid(entity.position.x, entity.position.y, rows, cols);
     const { x: wx, y: wy } = gridToScreen(grid.row, grid.col, ISO_ORIGIN, TW, TH);
-    const sx = wx * zoom + panX;
-    const sy = (wy + TH / 2) * zoom + panY; // centre of top-face diamond
-
-    const def      = getEntityDef(entity);
+    const sx        = wx * zoom + panX;
+    const sy        = (wy + TH / 2) * zoom + panY;
+    const def       = getEntityDef(entity);
     const isSelected = entity.id === selectedEntityId;
 
-    // Selection ring
     if (isSelected) {
       ctx.beginPath();
       ctx.arc(sx, sy, MARKER_R + 5, 0, Math.PI * 2);
@@ -165,13 +246,11 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
       ctx.stroke();
     }
 
-    // Drop shadow
     ctx.beginPath();
     ctx.arc(sx + 1, sy + 1, MARKER_R, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.fill();
 
-    // Filled circle
     ctx.beginPath();
     ctx.arc(sx, sy, MARKER_R, 0, Math.PI * 2);
     ctx.fillStyle   = def.color;
@@ -180,7 +259,6 @@ function drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntity
     ctx.lineWidth   = 1.5;
     ctx.stroke();
 
-    // Icon letter
     ctx.fillStyle = 'rgba(0,0,0,0.75)';
     ctx.fillText(def.icon ?? '?', sx, sy);
   }
@@ -219,48 +297,73 @@ const inputStyle = {
   fontFamily: 'monospace', fontSize: 11, padding: '4px 7px', width: '100%',
 };
 
-const selectStyle = {
-  ...inputStyle, padding: '3px 6px', cursor: 'pointer',
+const selectStyle = { ...inputStyle, padding: '3px 6px', cursor: 'pointer' };
+
+const toolbarBtnStyle = {
+  background: 'rgba(0,0,0,0.55)', border: `1px solid ${P.border}`,
+  color: P.muted, fontFamily: 'monospace', fontSize: 9, letterSpacing: 2,
+  padding: '4px 10px', cursor: 'pointer',
 };
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function MapEditorTab({ config }) {
-  // ── Map state ──────────────────────────────────────────────────────────────
+
+  // ── Map state ────────────────────────────────────────────────────────────────
   const [zoneList,     setZoneList]     = useState([]);
   const [zone,         setZone]         = useState(null);
   const [currentMapId, setCurrentMapId] = useState(null);
   const [isDirty,      setIsDirty]      = useState(false);
   const [loadError,    setLoadError]    = useState(null);
 
-  // ── Camera ─────────────────────────────────────────────────────────────────
+  // ── Camera ───────────────────────────────────────────────────────────────────
   const [camera, setCamera] = useState({ panX: 0, panY: 0, zoom: 1 });
 
-  // ── Editor mode ────────────────────────────────────────────────────────────
+  // ── Editor mode ──────────────────────────────────────────────────────────────
   const [editorMode, setEditorMode] = useState('tile'); // 'tile' | 'entity'
 
-  // ── Tile mode state ────────────────────────────────────────────────────────
+  // ── Tile mode ────────────────────────────────────────────────────────────────
   const [selectedTileType, setSelectedTileType] = useState(TILE_TYPES.FLOOR);
   const [hoveredTile,      setHovered]          = useState(null);
   const [isPainting,       setIsPainting]       = useState(false);
 
-  // ── Entity mode state ──────────────────────────────────────────────────────
+  // ── Brush tools ──────────────────────────────────────────────────────────────
+  const [brushTool, setBrushTool] = useState('paint'); // 'paint' | 'erase' | 'fill'
+  const [brushSize, setBrushSize] = useState(1);       // 1 | 3 | 5
+
+  // ── Entity mode ──────────────────────────────────────────────────────────────
   const [selectedEntityDef, setSelectedEntityDef] = useState(ENTITY_PALETTE[0]);
   const [selectedEntityId,  setSelectedEntityId]  = useState(null);
 
-  // ── Refs ───────────────────────────────────────────────────────────────────
-  const canvasRef    = useRef(null);
-  const containerRef = useRef(null);
-  const isPanningRef = useRef(false);
-  const lastMouseRef = useRef({ x: 0, y: 0 });
+  // ── Overlay / view ───────────────────────────────────────────────────────────
+  const [showGrid,   setShowGrid]   = useState(false);
+  const [refImage,   setRefImage]   = useState(null);  // HTMLImageElement | null
+  const [refOpacity, setRefOpacity] = useState(0.4);
+  const [refVisible, setRefVisible] = useState(true);
 
-  // Sync mutable values into refs so stable callbacks can read current values
-  const cameraRef           = useRef(camera);
-  const zoneRef             = useRef(zone);
-  const editorModeRef       = useRef(editorMode);
-  const isPaintingRef       = useRef(isPainting);
-  const selectedTileTypeRef = useRef(selectedTileType);
-  const selectedEntityDefRef= useRef(selectedEntityDef);
+  // ── History ──────────────────────────────────────────────────────────────────
+  const [historyLen, setHistoryLen] = useState(0);
+  const [futureLen,  setFutureLen]  = useState(0);
+
+  // ── Refs ─────────────────────────────────────────────────────────────────────
+  const canvasRef        = useRef(null);
+  const containerRef     = useRef(null);
+  const fileInputRef     = useRef(null);
+  const refImageInputRef = useRef(null);
+  const isPanningRef     = useRef(false);
+  const lastMouseRef     = useRef({ x: 0, y: 0 });
+  const historyRef       = useRef([]);  // zone snapshots (deepClone)
+  const futureRef        = useRef([]);  // redo snapshots
+
+  // Stable mirrors of reactive values for use inside stable callbacks
+  const cameraRef            = useRef(camera);
+  const zoneRef              = useRef(zone);
+  const editorModeRef        = useRef(editorMode);
+  const isPaintingRef        = useRef(isPainting);
+  const selectedTileTypeRef  = useRef(selectedTileType);
+  const selectedEntityDefRef = useRef(selectedEntityDef);
+  const brushToolRef         = useRef(brushTool);
+  const brushSizeRef         = useRef(brushSize);
 
   useEffect(() => { cameraRef.current            = camera; },           [camera]);
   useEffect(() => { zoneRef.current              = zone; },             [zone]);
@@ -268,8 +371,10 @@ export default function MapEditorTab({ config }) {
   useEffect(() => { isPaintingRef.current        = isPainting; },       [isPainting]);
   useEffect(() => { selectedTileTypeRef.current  = selectedTileType; }, [selectedTileType]);
   useEffect(() => { selectedEntityDefRef.current = selectedEntityDef; },[selectedEntityDef]);
+  useEffect(() => { brushToolRef.current         = brushTool; },        [brushTool]);
+  useEffect(() => { brushSizeRef.current         = brushSize; },        [brushSize]);
 
-  // ── Canvas resize ──────────────────────────────────────────────────────────
+  // ── Canvas resize ────────────────────────────────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -285,14 +390,19 @@ export default function MapEditorTab({ config }) {
     return () => ro.disconnect();
   }, []);
 
-  // ── Canvas redraw ──────────────────────────────────────────────────────────
+  // ── Canvas redraw ────────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    drawMapCanvas(canvas, zone, hoveredTile, camera, config, selectedEntityId, editorMode);
-  }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode]);
+    drawMapCanvas(
+      canvas, zone, hoveredTile, camera, config,
+      selectedEntityId, editorMode,
+      { refImage, refOpacity, refVisible, showGrid },
+    );
+  }, [zone, hoveredTile, camera, config, selectedEntityId, editorMode,
+      refImage, refOpacity, refVisible, showGrid]);
 
-  // ── Center camera on new map load ──────────────────────────────────────────
+  // ── Center camera on new map ──────────────────────────────────────────────────
   useEffect(() => {
     if (!zone || !canvasRef.current) return;
     const { width, height } = canvasRef.current;
@@ -300,7 +410,7 @@ export default function MapEditorTab({ config }) {
     setCamera(getInitialCamera(zone, width, height));
   }, [currentMapId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Zone list fetch ────────────────────────────────────────────────────────
+  // ── Zone list fetch ───────────────────────────────────────────────────────────
   useEffect(() => {
     fetch('/zones/index.json')
       .then(r => r.ok ? r.json() : Promise.reject())
@@ -308,7 +418,65 @@ export default function MapEditorTab({ config }) {
       .catch(() => setZoneList(FALLBACK_ZONES));
   }, []);
 
-  // ── Zone load ──────────────────────────────────────────────────────────────
+  // ── History helpers ───────────────────────────────────────────────────────────
+
+  // Push current zone onto the history stack and clear the future.
+  // Call BEFORE applying any destructive edit.
+  const commitHistory = useCallback(() => {
+    const z = zoneRef.current;
+    if (!z) return;
+    historyRef.current.push(deepClone(z));
+    if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
+    futureRef.current = [];
+    setHistoryLen(historyRef.current.length);
+    setFutureLen(0);
+  }, []);
+
+  // Reset stacks when a new map is opened.
+  const clearHistory = useCallback(() => {
+    historyRef.current = [];
+    futureRef.current  = [];
+    setHistoryLen(0);
+    setFutureLen(0);
+  }, []);
+
+  const undo = useCallback(() => {
+    if (!historyRef.current.length) return;
+    const prev = historyRef.current.pop();
+    futureRef.current.push(deepClone(zoneRef.current));
+    setZone(prev);
+    setIsDirty(true);
+    setHistoryLen(historyRef.current.length);
+    setFutureLen(futureRef.current.length);
+  }, []);
+
+  const redo = useCallback(() => {
+    if (!futureRef.current.length) return;
+    const next = futureRef.current.pop();
+    historyRef.current.push(deepClone(zoneRef.current));
+    setZone(next);
+    setIsDirty(true);
+    setHistoryLen(historyRef.current.length);
+    setFutureLen(futureRef.current.length);
+  }, []);
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────────
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo, redo]);
+
+  // ── Zone load ─────────────────────────────────────────────────────────────────
   const loadZoneById = useCallback(async (id) => {
     setLoadError(null);
     try {
@@ -319,14 +487,13 @@ export default function MapEditorTab({ config }) {
       setCurrentMapId(id);
       setIsDirty(false);
       setSelectedEntityId(null);
+      clearHistory();
     } catch (err) {
       setLoadError(`Could not load "${id}": ${err.message}`);
     }
-  }, []);
+  }, [clearHistory]);
 
-  // ── File upload ────────────────────────────────────────────────────────────
-  const fileInputRef = useRef(null);
-
+  // ── File upload ───────────────────────────────────────────────────────────────
   const handleFileUpload = useCallback((e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -339,18 +506,19 @@ export default function MapEditorTab({ config }) {
         setIsDirty(false);
         setLoadError(null);
         setSelectedEntityId(null);
+        clearHistory();
       } catch {
         setLoadError('Invalid JSON file.');
       }
     };
     reader.readAsText(file);
     e.target.value = '';
-  }, []);
+  }, [clearHistory]);
 
-  // ── New map ────────────────────────────────────────────────────────────────
+  // ── New map ───────────────────────────────────────────────────────────────────
   const handleNewMap = useCallback(() => {
     const id = `map_${Date.now()}`;
-    const w = 15, h = 15;
+    const w  = 15, h = 15;
     setZone({
       id, name: 'New Map',
       config: { width: w, height: h, seed: Date.now() },
@@ -363,9 +531,10 @@ export default function MapEditorTab({ config }) {
     setIsDirty(false);
     setLoadError(null);
     setSelectedEntityId(null);
-  }, []);
+    clearHistory();
+  }, [clearHistory]);
 
-  // ── Save ───────────────────────────────────────────────────────────────────
+  // ── Save ──────────────────────────────────────────────────────────────────────
   const handleSave = useCallback(() => {
     if (!zone) return;
     const blob = new Blob([JSON.stringify(zone, null, 2)], { type: 'application/json' });
@@ -376,7 +545,34 @@ export default function MapEditorTab({ config }) {
     setIsDirty(false);
   }, [zone]);
 
-  // ── Map config edits ───────────────────────────────────────────────────────
+  // ── Screenshot export ─────────────────────────────────────────────────────────
+  const handleScreenshot = useCallback(() => {
+    const canvas = canvasRef.current;
+    const z      = zoneRef.current;
+    if (!canvas || !z) return;
+    const url = canvas.toDataURL('image/png');
+    const a   = document.createElement('a');
+    a.href     = url;
+    a.download = `${z.id ?? 'map'}_screenshot.png`;
+    a.click();
+  }, []);
+
+  // ── Reference image upload ────────────────────────────────────────────────────
+  const handleRefImageUpload = useCallback((e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      setRefImage(img);
+      setRefVisible(true);
+      URL.revokeObjectURL(url);
+    };
+    img.src    = url;
+    e.target.value = '';
+  }, []);
+
+  // ── Map config edits ──────────────────────────────────────────────────────────
   const setMapField = useCallback((field, value) => {
     setZone(prev => { if (!prev) return prev; const next = deepClone(prev); next[field] = value; return next; });
     setIsDirty(true);
@@ -387,21 +583,31 @@ export default function MapEditorTab({ config }) {
     setIsDirty(true);
   }, []);
 
-  // ── Tile painting ─────────────────────────────────────────────────────────
-  const paintTile = useCallback((row, col) => {
+  // ── Tile tool ─────────────────────────────────────────────────────────────────
+  // Handles paint (with brush size), erase (with brush size), and fill.
+  // Uses spread-replace for tiles only — cheaper than deepClone for large grids.
+  const applyTileTool = useCallback((row, col) => {
+    const tool     = brushToolRef.current;
+    const size     = brushSizeRef.current;
+    const tileType = tool === 'erase' ? 0 : selectedTileTypeRef.current;
+
     setZone(prev => {
       if (!prev) return prev;
-      if (prev.tiles[row][col] === selectedTileTypeRef.current) return prev;
-      const next = deepClone(prev);
-      next.tiles[row][col] = selectedTileTypeRef.current;
-      return next;
+      if (tool === 'fill') {
+        const newTiles = floodFill(prev.tiles, row, col, tileType);
+        if (!newTiles) return prev;
+        return { ...prev, tiles: newTiles };
+      }
+      const newTiles = applyBrush(prev.tiles, row, col, tileType, size);
+      if (!newTiles) return prev;
+      return { ...prev, tiles: newTiles };
     });
     setIsDirty(true);
   }, []);
 
-  // ── Entity CRUD ────────────────────────────────────────────────────────────
+  // ── Entity CRUD ───────────────────────────────────────────────────────────────
   const placeEntity = useCallback((row, col) => {
-    const z   = zoneRef.current;
+    const z = zoneRef.current;
     if (!z) return;
     const rows = z.tiles.length;
     const cols = z.tiles[0].length;
@@ -411,7 +617,7 @@ export default function MapEditorTab({ config }) {
       id,
       type:     def.type,
       subtype:  def.subtype,
-      position: gridToWorld(row, col, rows, cols), // { x, y } world space
+      position: gridToWorld(row, col, rows, cols),
       facing:   'south',
       config:   { ...def.defaultConfig },
     };
@@ -427,6 +633,7 @@ export default function MapEditorTab({ config }) {
   }, []);
 
   const deleteEntity = useCallback((id) => {
+    commitHistory();
     setZone(prev => {
       if (!prev) return prev;
       const next = deepClone(prev);
@@ -435,7 +642,7 @@ export default function MapEditorTab({ config }) {
     });
     setSelectedEntityId(null);
     setIsDirty(true);
-  }, []);
+  }, [commitHistory]);
 
   const updateEntity = useCallback((id, updates) => {
     setZone(prev => {
@@ -464,7 +671,7 @@ export default function MapEditorTab({ config }) {
     setIsDirty(true);
   }, []);
 
-  // ── Hit-test (grid) ────────────────────────────────────────────────────────
+  // ── Grid hit-test ─────────────────────────────────────────────────────────────
   const hitTest = useCallback((mouseX, mouseY) => {
     const z = zoneRef.current;
     if (!z) return null;
@@ -474,13 +681,14 @@ export default function MapEditorTab({ config }) {
     return screenToGrid(worldX, worldY, ISO_ORIGIN, TW, TH, z.tiles.length, z.tiles[0].length);
   }, []);
 
-  // ── Mouse events ───────────────────────────────────────────────────────────
+  // ── Mouse events ──────────────────────────────────────────────────────────────
   const handleMouseDown = useCallback((e) => {
     e.preventDefault();
     const rect = canvasRef.current.getBoundingClientRect();
     const mx   = e.clientX - rect.left;
     const my   = e.clientY - rect.top;
 
+    // Middle-click always pans
     if (e.button === 1) {
       isPanningRef.current = true;
       lastMouseRef.current = { x: e.clientX, y: e.clientY };
@@ -489,33 +697,47 @@ export default function MapEditorTab({ config }) {
 
     if (e.button === 0) {
       if (editorModeRef.current === 'entity') {
-        // Try to select an existing entity marker first
+        // Select existing marker
         const hit = entityHitTest(mx, my, zoneRef.current, cameraRef.current);
-        if (hit) {
-          setSelectedEntityId(hit.id);
-          return;
-        }
-        // Click on empty tile → place new entity
+        if (hit) { setSelectedEntityId(hit.id); return; }
+        // Place on tile
         const tile = hitTest(mx, my);
         if (tile) {
+          commitHistory();
           placeEntity(tile.row, tile.col);
         } else {
           isPanningRef.current = true;
           lastMouseRef.current = { x: e.clientX, y: e.clientY };
         }
+
       } else {
-        // Tile mode: paint or pan
+        // Tile mode ─ Alt+click picks tile type
+        if (e.altKey) {
+          const tile = hitTest(mx, my);
+          if (tile) {
+            const z = zoneRef.current;
+            if (z) {
+              const picked = z.tiles[tile.row][tile.col];
+              if (picked !== 0) setSelectedTileType(picked);
+            }
+          }
+          return;
+        }
+
+        // Normal tile tool
         const tile = hitTest(mx, my);
         if (tile) {
-          paintTile(tile.row, tile.col);
-          setIsPainting(true);
+          commitHistory();
+          applyTileTool(tile.row, tile.col);
+          // fill is single-shot — no drag painting
+          if (brushToolRef.current !== 'fill') setIsPainting(true);
         } else {
           isPanningRef.current = true;
           lastMouseRef.current = { x: e.clientX, y: e.clientY };
         }
       }
     }
-  }, [hitTest, paintTile, placeEntity]);
+  }, [hitTest, applyTileTool, placeEntity, commitHistory]);
 
   const handleMouseMove = useCallback((e) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -534,11 +756,11 @@ export default function MapEditorTab({ config }) {
     const tile = hitTest(mx, my);
     setHovered(tile);
 
-    // Drag-paint only in tile mode
+    // Drag-paint (tile mode only, not fill)
     if (editorModeRef.current === 'tile' && isPaintingRef.current && tile) {
-      paintTile(tile.row, tile.col);
+      applyTileTool(tile.row, tile.col);
     }
-  }, [hitTest, paintTile]);
+  }, [hitTest, applyTileTool]);
 
   const handleMouseUp = useCallback(() => {
     isPanningRef.current = false;
@@ -551,6 +773,7 @@ export default function MapEditorTab({ config }) {
     setHovered(null);
   }, []);
 
+  // ── Wheel zoom ────────────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -571,33 +794,30 @@ export default function MapEditorTab({ config }) {
     return () => canvas.removeEventListener('wheel', onWheel);
   }, []);
 
-  // ── Derived ────────────────────────────────────────────────────────────────
-  const selectedEntity = zone?.entities?.find(e => e.id === selectedEntityId) ?? null;
-  const tileTypeEntries = Object.entries(TILE_TYPES);
-
-  // ── Mode switch helper ─────────────────────────────────────────────────────
+  // ── Mode switch ───────────────────────────────────────────────────────────────
   const switchMode = useCallback((mode) => {
     setEditorMode(mode);
     setSelectedEntityId(null);
     setHovered(null);
   }, []);
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────────
+  const selectedEntity  = zone?.entities?.find(e => e.id === selectedEntityId) ?? null;
+  const tileTypeEntries = Object.entries(TILE_TYPES);
+
+  // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <div style={{ display: 'flex', height: '100%', width: '100%', overflow: 'hidden' }}>
 
-      {/* ── Left panel ──────────────────────────────────────────────────────── */}
+      {/* ── Left panel ───────────────────────────────────────────────────────── */}
       <div style={{
         width: 264, flexShrink: 0, background: P.panel,
         borderRight: `1px solid ${P.border}`,
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}>
 
-        {/* Mode toggle (always visible, above scroll area) */}
-        <div style={{
-          display: 'flex', gap: 0,
-          borderBottom: `1px solid ${P.border}`, flexShrink: 0,
-        }}>
+        {/* Mode toggle */}
+        <div style={{ display: 'flex', borderBottom: `1px solid ${P.border}`, flexShrink: 0 }}>
           {[['tile', 'TILE MODE'], ['entity', 'ENTITY MODE']].map(([mode, label]) => {
             const active = editorMode === mode;
             return (
@@ -619,7 +839,7 @@ export default function MapEditorTab({ config }) {
           display: 'flex', flexDirection: 'column', gap: 20,
         }}>
 
-          {/* ── Maps ────────────────────────────────────────────────────── */}
+          {/* ── MAPS ─────────────────────────────────────────────────────────── */}
           <Section title="MAPS">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
               {zoneList.map(id => (
@@ -633,22 +853,28 @@ export default function MapEditorTab({ config }) {
               ))}
             </div>
             <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={handleNewMap} style={{ ...btnStyle(P.accent), flex: 1, fontSize: 10, padding: '6px 8px' }}>
+              <button onClick={handleNewMap}
+                style={{ ...btnStyle(P.accent), flex: 1, fontSize: 10, padding: '6px 8px' }}>
                 + NEW MAP
               </button>
-              <button onClick={() => fileInputRef.current?.click()} style={{ ...btnStyle(P.muted), fontSize: 10, padding: '6px 8px' }}>
+              <button onClick={() => fileInputRef.current?.click()}
+                style={{ ...btnStyle(P.muted), fontSize: 10, padding: '6px 8px' }}>
                 UPLOAD
               </button>
-              <input ref={fileInputRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleFileUpload} />
+              <input ref={fileInputRef} type="file" accept=".json"
+                style={{ display: 'none' }} onChange={handleFileUpload} />
             </div>
-            {loadError && <div style={{ fontSize: 10, color: P.warn, letterSpacing: 1 }}>{loadError}</div>}
+            {loadError && (
+              <div style={{ fontSize: 10, color: P.warn, letterSpacing: 1 }}>{loadError}</div>
+            )}
           </Section>
 
-          {/* ── Map config ───────────────────────────────────────────────── */}
+          {/* ── MAP CONFIG ───────────────────────────────────────────────────── */}
           {zone && (
             <Section title="MAP CONFIG">
               <FieldRow label="NAME">
-                <input style={inputStyle} value={zone.name ?? ''} onChange={e => setMapField('name', e.target.value)} />
+                <input style={inputStyle} value={zone.name ?? ''}
+                  onChange={e => setMapField('name', e.target.value)} />
               </FieldRow>
               <FieldRow label="ID">
                 <input style={{ ...inputStyle, color: P.muted }} value={zone.id ?? ''} readOnly />
@@ -673,36 +899,98 @@ export default function MapEditorTab({ config }) {
             </Section>
           )}
 
-          {/* ── TILE MODE: palette ───────────────────────────────────────── */}
+          {/* ── TILE MODE ────────────────────────────────────────────────────── */}
           {editorMode === 'tile' && (
-            <Section title="TILE PALETTE">
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                {tileTypeEntries.map(([key, typeId]) => {
-                  const active = selectedTileType === typeId;
-                  const swatch = config.pal[typeId]?.[0] ?? '#808080';
-                  return (
-                    <button key={key} onClick={() => setSelectedTileType(typeId)} style={{
-                      display: 'flex', alignItems: 'center', gap: 10,
-                      background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
-                      border: `1px solid ${active ? P.accent : P.border}`,
-                      padding: '7px 10px', cursor: 'pointer', width: '100%',
-                    }}>
-                      <span style={{ width: 16, height: 16, background: swatch, border: `1px solid ${P.border}`, flexShrink: 0 }}/>
-                      <span style={{ fontFamily: 'monospace', fontSize: 10, color: active ? P.accent : P.muted, letterSpacing: 2 }}>
-                        {TILE_LABELS[typeId].toUpperCase()}
-                      </span>
-                      {active && <span style={{ marginLeft: 'auto', fontSize: 9, color: P.accent }}>ACTIVE</span>}
-                    </button>
-                  );
-                })}
-              </div>
-              <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.6 }}>
-                CLICK or DRAG to paint<br/>SCROLL to zoom · MIDDLE-DRAG to pan
-              </div>
-            </Section>
+            <>
+              {/* Brush tools */}
+              <Section title="BRUSH">
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {[['paint', 'PAINT'], ['erase', 'ERASE'], ['fill', 'FILL']].map(([id, label]) => {
+                    const active = brushTool === id;
+                    return (
+                      <button key={id} onClick={() => setBrushTool(id)} style={{
+                        flex: 1,
+                        background: active ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        color: active ? P.accent : P.muted,
+                        fontFamily: 'monospace', fontSize: 9, letterSpacing: 1,
+                        padding: '6px 4px', cursor: 'pointer',
+                      }}>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Brush size — hidden for fill (it's always the full region) */}
+                {brushTool !== 'fill' && (
+                  <FieldRow label="SIZE">
+                    <div style={{ display: 'flex', gap: 4, flex: 1 }}>
+                      {[1, 3, 5].map(s => {
+                        const active = brushSize === s;
+                        return (
+                          <button key={s} onClick={() => setBrushSize(s)} style={{
+                            flex: 1,
+                            background: active ? 'rgba(0,212,255,0.12)' : 'transparent',
+                            border: `1px solid ${active ? P.accent : P.border}`,
+                            color: active ? P.accent : P.muted,
+                            fontFamily: 'monospace', fontSize: 9,
+                            padding: '5px 0', cursor: 'pointer',
+                          }}>
+                            {s}×{s}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </FieldRow>
+                )}
+
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                  ALT+CLICK to pick tile type<br />
+                  CTRL+Z undo · CTRL+Y redo
+                </div>
+              </Section>
+
+              {/* Tile palette */}
+              <Section title="TILE PALETTE">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {tileTypeEntries.map(([key, typeId]) => {
+                    const active = selectedTileType === typeId;
+                    const swatch = config.pal[typeId]?.[0] ?? '#808080';
+                    return (
+                      <button key={key} onClick={() => setSelectedTileType(typeId)} style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        background: active ? 'rgba(0,212,255,0.1)' : 'transparent',
+                        border: `1px solid ${active ? P.accent : P.border}`,
+                        padding: '7px 10px', cursor: 'pointer', width: '100%',
+                      }}>
+                        <span style={{
+                          width: 16, height: 16, background: swatch,
+                          border: `1px solid ${P.border}`, flexShrink: 0,
+                        }} />
+                        <span style={{
+                          fontFamily: 'monospace', fontSize: 10,
+                          color: active ? P.accent : P.muted, letterSpacing: 2,
+                        }}>
+                          {TILE_LABELS[typeId].toUpperCase()}
+                        </span>
+                        {active && (
+                          <span style={{ marginLeft: 'auto', fontSize: 9, color: P.accent }}>
+                            ACTIVE
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.6 }}>
+                  CLICK or DRAG to paint<br />SCROLL to zoom · MIDDLE-DRAG to pan
+                </div>
+              </Section>
+            </>
           )}
 
-          {/* ── ENTITY MODE: palette ─────────────────────────────────────── */}
+          {/* ── ENTITY MODE ──────────────────────────────────────────────────── */}
           {editorMode === 'entity' && (
             <>
               <Section title="ENTITIES">
@@ -722,23 +1010,32 @@ export default function MapEditorTab({ config }) {
                       >
                         <span style={{
                           width: 14, height: 14, borderRadius: '50%',
-                          background: def.color, flexShrink: 0, display: 'block',
-                          boxShadow: `0 0 0 1.5px rgba(255,255,255,0.2)`,
-                        }}/>
-                        <span style={{ fontFamily: 'monospace', fontSize: 10, color: active ? P.accent : P.muted, letterSpacing: 1 }}>
+                          background: def.color, flexShrink: 0,
+                          boxShadow: '0 0 0 1.5px rgba(255,255,255,0.2)',
+                        }} />
+                        <span style={{
+                          fontFamily: 'monospace', fontSize: 10,
+                          color: active ? P.accent : P.muted, letterSpacing: 1,
+                        }}>
                           {def.label.toUpperCase()}
                         </span>
-                        {active && <span style={{ marginLeft: 'auto', fontSize: 9, color: P.accent }}>ACTIVE</span>}
+                        {active && (
+                          <span style={{ marginLeft: 'auto', fontSize: 9, color: P.accent }}>
+                            ACTIVE
+                          </span>
+                        )}
                       </button>
                     );
                   })}
                 </div>
-                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.6 }}>
-                  CLICK tile to place · CLICK marker to select<br/>SCROLL to zoom · MIDDLE-DRAG to pan
+                <div style={{ fontSize: 9, color: P.muted, letterSpacing: 1, lineHeight: 1.7 }}>
+                  CLICK tile to place · CLICK marker to select<br />
+                  SCROLL to zoom · MIDDLE-DRAG to pan<br />
+                  CTRL+Z undo · CTRL+Y redo
                 </div>
               </Section>
 
-              {/* ── Entity editor ──────────────────────────────────────── */}
+              {/* Entity editor panel */}
               {selectedEntity && (
                 <Section title="ENTITY EDITOR">
                   <FieldRow label="TYPE">
@@ -762,8 +1059,6 @@ export default function MapEditorTab({ config }) {
                       ))}
                     </select>
                   </FieldRow>
-
-                  {/* Dynamic config fields */}
                   {Object.entries(selectedEntity.config ?? {}).map(([key, val]) => (
                     <FieldRow key={key} label={key.toUpperCase()}>
                       <input
@@ -773,7 +1068,6 @@ export default function MapEditorTab({ config }) {
                       />
                     </FieldRow>
                   ))}
-
                   <button
                     onClick={() => deleteEntity(selectedEntity.id)}
                     style={{ ...btnStyle(P.warn), width: '100%', marginTop: 2 }}
@@ -785,10 +1079,73 @@ export default function MapEditorTab({ config }) {
             </>
           )}
 
+          {/* ── REFERENCE IMAGE ──────────────────────────────────────────────── */}
+          {zone && (
+            <Section title="REFERENCE IMAGE">
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => refImageInputRef.current?.click()}
+                  style={{ ...btnStyle(P.muted), flex: 1, fontSize: 9, padding: '6px 8px' }}
+                >
+                  {refImage ? 'REPLACE' : 'UPLOAD IMAGE'}
+                </button>
+                {refImage && (
+                  <button
+                    onClick={() => { setRefImage(null); setRefVisible(false); }}
+                    style={{ ...btnStyle(P.warn), fontSize: 9, padding: '6px 8px' }}
+                  >
+                    CLEAR
+                  </button>
+                )}
+              </div>
+              <input
+                ref={refImageInputRef}
+                type="file" accept="image/*"
+                style={{ display: 'none' }}
+                onChange={handleRefImageUpload}
+              />
+              {refImage && (
+                <>
+                  <FieldRow label="VISIBLE">
+                    <button
+                      onClick={() => setRefVisible(v => !v)}
+                      style={{
+                        background: refVisible ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        border: `1px solid ${refVisible ? P.accent : P.border}`,
+                        color: refVisible ? P.accent : P.muted,
+                        fontFamily: 'monospace', fontSize: 9, letterSpacing: 2,
+                        padding: '4px 14px', cursor: 'pointer',
+                      }}
+                    >
+                      {refVisible ? 'ON' : 'OFF'}
+                    </button>
+                  </FieldRow>
+                  <FieldRow label="OPACITY">
+                    <input
+                      type="range" min={0} max={1} step={0.05}
+                      value={refOpacity}
+                      onChange={e => setRefOpacity(parseFloat(e.target.value))}
+                      style={{ flex: 1, accentColor: P.accent }}
+                    />
+                    <span style={{
+                      fontSize: 9, color: P.muted,
+                      width: 30, textAlign: 'right', flexShrink: 0,
+                    }}>
+                      {Math.round(refOpacity * 100)}%
+                    </span>
+                  </FieldRow>
+                </>
+              )}
+            </Section>
+          )}
+
         </div>
 
-        {/* ── Footer: save ────────────────────────────────────────────────── */}
-        <div style={{ padding: '12px 14px', borderTop: `1px solid ${P.border}`, display: 'flex', gap: 8 }}>
+        {/* Footer: save */}
+        <div style={{
+          padding: '12px 14px', borderTop: `1px solid ${P.border}`,
+          display: 'flex', gap: 8,
+        }}>
           <button
             onClick={handleSave}
             disabled={!zone}
@@ -799,30 +1156,79 @@ export default function MapEditorTab({ config }) {
         </div>
       </div>
 
-      {/* ── Canvas area ─────────────────────────────────────────────────────── */}
+      {/* ── Canvas area ──────────────────────────────────────────────────────── */}
       <div ref={containerRef} style={{ flex: 1, position: 'relative', overflow: 'hidden', background: P.bg }}>
 
-        {/* Status bar */}
+        {/* Toolbar overlay */}
         <div style={{
           position: 'absolute', top: 12, left: 14, right: 14, zIndex: 1,
-          display: 'flex', justifyContent: 'space-between', pointerEvents: 'none',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          pointerEvents: 'none',
         }}>
+          {/* Left: map label */}
           <span style={{ fontSize: 10, color: P.muted, letterSpacing: 2 }}>
-            {zone ? `${zone.name ?? zone.id}  ${zone.config?.width}×${zone.config?.height}` : 'NO MAP LOADED'}
+            {zone
+              ? `${zone.name ?? zone.id}  ${zone.config?.width}×${zone.config?.height}`
+              : 'NO MAP LOADED'}
           </span>
-          <span style={{ fontSize: 10, color: P.muted, letterSpacing: 2 }}>
-            {editorMode === 'entity'
-              ? `${zone?.entities?.length ?? 0} entities`
-              : hoveredTile ? `${hoveredTile.col}, ${hoveredTile.row}` : ''}
-            {'  ·  '}{Math.round(camera.zoom * 100)}%
-          </span>
+
+          {/* Right: action buttons + status */}
+          <div style={{
+            display: 'flex', gap: 5, alignItems: 'center',
+            pointerEvents: 'auto',
+          }}>
+            <button
+              onClick={undo}
+              disabled={historyLen === 0}
+              title="Undo (Ctrl+Z)"
+              style={{ ...toolbarBtnStyle, opacity: historyLen > 0 ? 1 : 0.35 }}
+            >
+              ↩ UNDO
+            </button>
+            <button
+              onClick={redo}
+              disabled={futureLen === 0}
+              title="Redo (Ctrl+Y)"
+              style={{ ...toolbarBtnStyle, opacity: futureLen > 0 ? 1 : 0.35 }}
+            >
+              REDO ↪
+            </button>
+            <button
+              onClick={() => setShowGrid(g => !g)}
+              title="Toggle grid overlay"
+              style={{
+                ...toolbarBtnStyle,
+                color:  showGrid ? P.accent : P.muted,
+                border: `1px solid ${showGrid ? P.accent : P.border}`,
+              }}
+            >
+              GRID
+            </button>
+            <button
+              onClick={handleScreenshot}
+              disabled={!zone}
+              title="Export canvas as PNG"
+              style={{ ...toolbarBtnStyle, opacity: zone ? 1 : 0.4 }}
+            >
+              EXPORT
+            </button>
+
+            <span style={{ fontSize: 10, color: P.muted, letterSpacing: 2, marginLeft: 4 }}>
+              {editorMode === 'entity'
+                ? `${zone?.entities?.length ?? 0} entities`
+                : hoveredTile ? `${hoveredTile.col}, ${hoveredTile.row}` : ''}
+              {'  ·  '}{Math.round(camera.zoom * 100)}%
+            </span>
+          </div>
         </div>
 
         <canvas
           ref={canvasRef}
           style={{
             display: 'block',
-            cursor: editorMode === 'entity' ? 'crosshair' : isPainting ? 'crosshair' : 'default',
+            cursor: editorMode === 'entity'
+              ? 'crosshair'
+              : isPainting ? 'crosshair' : 'default',
           }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
