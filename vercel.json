@@ -1,7 +1,11 @@
 {
   "version": 2,
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "routes": [
-    { "src": "/",        "dest": "/client/index.html" },
-    { "src": "/(.*)",    "dest": "/client/$1" }
+    { "src": "/tools/tile-editor/(.*)", "dest": "/tools/tile-editor/$1" },
+    { "src": "/tools/tile-editor",      "dest": "/tools/tile-editor/index.html" },
+    { "src": "/",                       "dest": "/client/index.html" },
+    { "src": "/(.*)",                   "dest": "/client/$1" }
   ]
 }
