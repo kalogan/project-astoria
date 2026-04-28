@@ -41,3 +41,55 @@ export class Door {
     this.mat.color.setHex(UNLOCKED_COLOR);
   }
 }
+
+export class NPC {
+  constructor(scene, def) {
+    this.id   = def.id;
+    this.type = 'npc';
+    this.name = def.name ?? def.id;
+
+    const col    = def.color ?? 0xd4a96a;
+    const npcMat = new THREE.MeshLambertMaterial({ color: col });
+    const g      = new THREE.Group();
+
+    // Body (tunic)
+    const body = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.14, 0.16, 0.70, 6),
+      npcMat,
+    );
+    body.position.y = 0.35;
+    g.add(body);
+
+    // Head
+    const head = new THREE.Mesh(
+      new THREE.SphereGeometry(0.15, 7, 5),
+      npcMat,
+    );
+    head.position.y = 0.875;
+    g.add(head);
+
+    // Staff pole
+    const staffMat = new THREE.MeshLambertMaterial({ color: 0x7a5a28 });
+    const staff = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.025, 0.025, 1.3, 4),
+      staffMat,
+    );
+    staff.position.set(0.22, 0.65, 0);
+    g.add(staff);
+
+    // Staff ornament
+    const ornament = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(0.07, 0),
+      new THREE.MeshLambertMaterial({ color: 0xf0c040, emissive: 0x604000, emissiveIntensity: 0.5 }),
+    );
+    ornament.position.set(0.22, 1.32, 0);
+    g.add(ornament);
+
+    g.position.set(def.x, 0, def.z);
+    if (def.facing !== undefined) g.rotation.y = def.facing;
+    g.castShadow = true;
+
+    this.mesh = g;
+    scene.add(this.mesh);
+  }
+}

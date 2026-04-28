@@ -1,14 +1,21 @@
 export class TriggerSystem {
-  constructor() {
+  constructor(player) {
+    this.player   = player;
+    this.registry = null;
     this.triggers = [];
   }
 
-  // register({ condition, action, once = true })
+  init(_zone, registry, _eventBus, rng = null) {
+    this.registry = registry;
+    this.rng      = rng;
+  }
+
   register(trigger) {
     this.triggers.push({ once: true, fired: false, ...trigger });
   }
 
-  update(playerPos) {
+  update(_delta) {
+    const playerPos = this.player.mesh.position;
     for (const t of this.triggers) {
       if (t.fired && t.once) continue;
       if (t.condition(playerPos)) {
@@ -17,6 +24,8 @@ export class TriggerSystem {
       }
     }
   }
+
+  onEvent(_event) {}
 }
 
 // --- Condition factories ---

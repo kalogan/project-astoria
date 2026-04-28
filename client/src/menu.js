@@ -1,4 +1,4 @@
-import { hasSave, clearSave } from './persistence.js';
+import { hasSave, clearSave } from './saveSystem.js';
 
 export function showMenu() {
   return new Promise(resolve => {

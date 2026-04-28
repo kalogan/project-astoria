@@ -1,0 +1,58 @@
+{
+  "id": "Cameron_Start",
+  "name": "Cameron's Square",
+  "config": { "width": 15, "height": 15, "tileSize": 1, "seed": 19870423 },
+  "playerStart": { "x": 0, "z": 0 },
+  "tiles": [
+    [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,2,2,1,1,1,1,1,2,2,1,1,2],
+    [2,1,1,2,3,1,1,1,1,1,3,2,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,1,1,1,3,3,3,1,1,1,1,1,2],
+    [2,1,1,1,1,1,3,1,3,1,1,1,1,1,2],
+    [2,1,1,1,1,1,3,3,3,1,1,1,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,2,3,1,1,1,1,1,3,2,1,1,2],
+    [2,1,1,2,2,1,1,1,1,1,2,2,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]
+  ],
+  "entities": [
+    { "id": "key_gold",      "type": "key",    "position": { "x": -3, "y": -2 } },
+    { "id": "door_gold",     "type": "door",   "position": { "x":  3, "y": -2 } },
+    { "id": "key_silver",    "type": "key",    "position": { "x": -3, "y":  2 } },
+    { "id": "door_silver",   "type": "door",   "position": { "x":  3, "y":  2 } },
+    { "id": "enemy_1",       "type": "enemy",  "position": { "x": -2, "y": -4 } },
+    { "id": "enemy_2",       "type": "enemy",  "position": { "x":  2, "y":  4 } },
+    { "id": "portal_south",  "type": "portal", "position": { "x":  0, "y":  6 } }
+  ],
+  "systems": {
+    "keys": [
+      { "entityId": "key_gold",   "keyId": "gold",   "color": "#ffd700" },
+      { "entityId": "key_silver", "keyId": "silver", "color": "#c0c0c0" }
+    ],
+    "doors": [
+      { "entityId": "door_gold",   "keyId": "gold",   "color": "#b8860b" },
+      { "entityId": "door_silver", "keyId": "silver", "color": "#708090" }
+    ],
+    "enemies": [
+      { "entityId": "enemy_1" },
+      { "entityId": "enemy_2" }
+    ],
+    "portals": [
+      {
+        "entityId":   "portal_south",
+        "radius":     1.2,
+        "targetZone": "Cameron_Forest",
+        "spawnX":     0,
+        "spawnZ":     -4
+      }
+    ],
+    "quests": [
+      { "id": "cs_patrol", "type": "kill", "title": "Clear the Square", "goal": 2 }
+    ]
+  }
+}

@@ -1,8 +1,9 @@
 {
   "id": "zone_02",
   "name": "Dungeon",
-  "playerStart": { "x": 0, "z": -5 },
-  "grid": [
+  "config": { "width": 15, "height": 15, "tileSize": 1, "seed": 55667788 },
+  "playerStart": { "x": 0, "z": -4 },
+  "tiles": [
     [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
     [2,1,1,2,1,1,1,3,1,1,1,2,1,1,2],
     [2,1,1,2,1,1,1,3,1,1,1,2,1,1,2],
@@ -20,19 +21,33 @@
     [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]
   ],
   "entities": [
-    { "type": "key",  "id": "key_green",  "keyId": "green",  "x":  3, "z":  3, "color": "#44ff88" },
-    { "type": "door", "id": "door_green", "keyId": "green",  "x": -4, "z":  0, "color": "#003300" }
+    { "id": "key_green",    "type": "key",    "position": { "x":  3, "y":  3 } },
+    { "id": "door_green",   "type": "door",   "position": { "x": -4, "y":  0 } },
+    { "id": "enemy_1",      "type": "enemy",  "position": { "x": -1, "y": -2 } },
+    { "id": "enemy_2",      "type": "enemy",  "position": { "x":  1, "y":  2 } },
+    { "id": "enemy_3",      "type": "enemy",  "position": { "x":  3, "y": -3 } },
+    { "id": "portal_north", "type": "portal", "position": { "x":  0, "y": -6 } }
   ],
-  "enemies": [
-    { "x": -1, "z": -2 },
-    { "x":  1, "z":  2 },
-    { "x":  3, "z": -3 }
-  ],
-  "triggers": [
-    {
-      "type": "area", "x": 0, "z": -6, "radius": 1.2,
-      "once": true, "action": "loadZone",
-      "zoneId": "zone_01", "spawnX": 0, "spawnZ": 5
-    }
-  ]
+  "systems": {
+    "keys": [
+      { "entityId": "key_green",  "keyId": "green", "color": "#44ff88" }
+    ],
+    "doors": [
+      { "entityId": "door_green", "keyId": "green", "color": "#003300" }
+    ],
+    "enemies": [
+      { "entityId": "enemy_1" },
+      { "entityId": "enemy_2" },
+      { "entityId": "enemy_3" }
+    ],
+    "portals": [
+      {
+        "entityId":   "portal_north",
+        "radius":     1.2,
+        "targetZone": "zone_01",
+        "spawnX":     0,
+        "spawnZ":     4
+      }
+    ]
+  }
 }

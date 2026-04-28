@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git remote *)",
+      "Bash(ssh -T git@github.com)",
+      "Bash(chmod 700 ~/.ssh)",
+      "Bash(ssh-keyscan -t ed25519 github.com)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(node -e ' *)",
+      "Bash(where vercel *)",
+      "Bash(npx vercel *)",
+      "Bash(vercel --prod)",
+      "Bash(npm run *)"
+    ]
+  }
+}

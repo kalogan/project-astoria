@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 
 // frustumSize is mutable — updated per zone by setFrustumSize()
-let _frustumSize = 22;
+// Tight Astonia-style default: player fills ~30 % of screen height.
+let _frustumSize = 13;
 
 export function setFrustumSize(camera, renderer, size) {
   _frustumSize = size;
@@ -43,15 +44,37 @@ export function createScene() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type    = THREE.PCFSoftShadowMap;   // soft shadow edges
   document.body.appendChild(renderer.domElement);
 
-  // Lighting
-  const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-  scene.add(ambient);
+  // ── Lighting ───────────────────────────────────────────────────────────────
+  //
+  // HemisphereLight replaces flat AmbientLight.  It shines warm sky-colour from
+  // above and a dark earthy colour from below, giving every vertical surface a
+  // natural top/bottom gradient without any per-tile work.
+  //
+  // Palette:  sky  = soft afternoon gold
+  //           ground = deep shadow brown
+  const hemi = new THREE.HemisphereLight(0xffe8c0, 0x1c140a, 0.70);
+  scene.add(hemi);
 
-  const directional = new THREE.DirectionalLight(0xffffff, 1.0);
-  directional.position.set(15, 30, 15);
+  // Key directional light — slightly north-west angle for good isometric shadow
+  // direction (shadows fall to the south-east, matching the camera's viewing angle).
+  const directional = new THREE.DirectionalLight(0xfff5e0, 0.95);
+  directional.position.set(10, 28, 16);
   directional.castShadow = true;
+
+  // Shadow map: 2048 px gives crisp prop/wall shadows without artefacts.
+  // Camera bounds ±48 cover every authored zone (Cameron is 64-wide = ±32).
+  directional.shadow.mapSize.set(2048, 2048);
+  directional.shadow.camera.left   = -48;
+  directional.shadow.camera.right  =  48;
+  directional.shadow.camera.top    =  48;
+  directional.shadow.camera.bottom = -48;
+  directional.shadow.camera.near   =  1;
+  directional.shadow.camera.far    =  160;
+  directional.shadow.bias          = -0.0003;   // reduce shadow acne on flat tiles
+
   scene.add(directional);
 
   window.addEventListener('resize', () => {

@@ -1,8 +1,9 @@
 {
   "id": "zone_01",
   "name": "Town Square",
+  "config": { "width": 15, "height": 15, "tileSize": 1, "seed": 11223344 },
   "playerStart": { "x": 0, "z": 0 },
-  "grid": [
+  "tiles": [
     [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
     [2,1,1,1,1,1,1,3,1,1,1,1,1,1,2],
     [2,1,1,1,1,1,1,3,1,1,1,1,1,1,2],
@@ -20,20 +21,35 @@
     [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]
   ],
   "entities": [
-    { "type": "key",  "id": "key_red",   "keyId": "red",  "x": -2, "z":  0, "color": "#ff4444" },
-    { "type": "key",  "id": "key_blue",  "keyId": "blue", "x":  0, "z": -2, "color": "#4488ff" },
-    { "type": "door", "id": "door_red",  "keyId": "red",  "x":  4, "z":  0, "color": "#8b0000" },
-    { "type": "door", "id": "door_blue", "keyId": "blue", "x":  0, "z": -4, "color": "#00008b" }
+    { "id": "key_red",      "type": "key",    "position": { "x": -2, "y":  0 } },
+    { "id": "key_blue",     "type": "key",    "position": { "x":  0, "y": -2 } },
+    { "id": "door_red",     "type": "door",   "position": { "x":  4, "y":  0 } },
+    { "id": "door_blue",    "type": "door",   "position": { "x":  0, "y": -4 } },
+    { "id": "enemy_1",      "type": "enemy",  "position": { "x":  3, "y":  3 } },
+    { "id": "enemy_2",      "type": "enemy",  "position": { "x": -3, "y":  3 } },
+    { "id": "portal_south", "type": "portal", "position": { "x":  0, "y":  6 } }
   ],
-  "enemies": [
-    { "x":  3, "z":  3 },
-    { "x": -3, "z":  3 }
-  ],
-  "triggers": [
-    {
-      "type": "area", "x": 0, "z": 6, "radius": 1.2,
-      "once": true, "action": "loadZone",
-      "zoneId": "zone_02", "spawnX": 0, "spawnZ": -5
-    }
-  ]
+  "systems": {
+    "keys": [
+      { "entityId": "key_red",  "keyId": "red",  "color": "#ff4444" },
+      { "entityId": "key_blue", "keyId": "blue", "color": "#4488ff" }
+    ],
+    "doors": [
+      { "entityId": "door_red",  "keyId": "red",  "color": "#8b0000" },
+      { "entityId": "door_blue", "keyId": "blue", "color": "#00008b" }
+    ],
+    "enemies": [
+      { "entityId": "enemy_1" },
+      { "entityId": "enemy_2" }
+    ],
+    "portals": [
+      {
+        "entityId":   "portal_south",
+        "radius":     1.2,
+        "targetZone": "zone_02",
+        "spawnX":     0,
+        "spawnZ":     -4
+      }
+    ]
+  }
 }

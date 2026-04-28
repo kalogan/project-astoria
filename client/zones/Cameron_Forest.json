@@ -1,0 +1,56 @@
+{
+  "id": "Cameron_Forest",
+  "name": "Cameron's Forest",
+  "config": { "width": 15, "height": 15, "tileSize": 1, "seed": 20010917 },
+  "playerStart": { "x": 0, "z": 4 },
+  "tiles": [
+    [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,2,1,1,2,1,2,1,1,2,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,2,1,1,1,1,1,1,1,2,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,3,3,3,3,3,3,3,3,3,3,3,3,3,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,2,1,1,1,1,1,1,1,2,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,2,1,1,2,1,2,1,1,2,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,1,1,1,1,1,1,1,1,1,1,1,1,1,2],
+    [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]
+  ],
+  "entities": [
+    { "id": "portal_north",  "type": "portal", "position": { "x":  0, "y": -6 } },
+    { "id": "key_emerald",   "type": "key",    "position": { "x":  3, "y":  3 } },
+    { "id": "door_emerald",  "type": "door",   "position": { "x": -5, "y": -2 } },
+    { "id": "enemy_1",       "type": "enemy",  "position": { "x": -1, "y": -3 } },
+    { "id": "enemy_2",       "type": "enemy",  "position": { "x":  2, "y":  1 } },
+    { "id": "enemy_3",       "type": "enemy",  "position": { "x": -3, "y":  3 } }
+  ],
+  "systems": {
+    "keys": [
+      { "entityId": "key_emerald",  "keyId": "emerald", "color": "#50c878" }
+    ],
+    "doors": [
+      { "entityId": "door_emerald", "keyId": "emerald", "color": "#1a4a2e" }
+    ],
+    "enemies": [
+      { "entityId": "enemy_1" },
+      { "entityId": "enemy_2" },
+      { "entityId": "enemy_3" }
+    ],
+    "portals": [
+      {
+        "entityId":   "portal_north",
+        "radius":     1.2,
+        "targetZone": "Cameron_Start",
+        "spawnX":     0,
+        "spawnZ":     4
+      }
+    ],
+    "quests": [
+      { "id": "cf_hunt", "type": "kill", "title": "Forest Sweep", "goal": 3 }
+    ]
+  }
+}
